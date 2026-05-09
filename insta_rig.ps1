@@ -1,14 +1,12 @@
 # ===================================================
-# insta_rig.ps1 - Automated App Installer for Windows
+# auto_win.ps1 - Automated App Installer for Windows
 # ===================================================
 
 Clear-Host
 
 $ProgressPreference = 'SilentlyContinue'
 
-# ================================================
-# Auto-Elevate to Administrator
-# ================================================
+# Auto-Elevate
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     $shell = if (Get-Command pwsh -ErrorAction SilentlyContinue) { "pwsh" } else { "powershell" }
     Start-Process $shell -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
@@ -19,7 +17,7 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 # ================================================
-# Progress Bar 
+# Progress Bar
 # ================================================
 $script:_pbRow = -1
 
@@ -33,36 +31,29 @@ function Show-ProgressBar {
 
     $winWidth = $Host.UI.RawUI.WindowSize.Width
 
-    # Build stats (only used during download)
     $stats = ""
     if ($Downloaded) { $stats += $Downloaded }
-    if ($Speed) { $stats += " @ $Speed" }
+    if ($Speed)      { $stats += " @ $Speed" }
     $stats = $stats.Trim()
 
     $pctLabel = if ($Percent -lt 0) { '  --  ' } else { "$Percent%" }
 
-    # Status + Stats (left aligned)
     $statusPart = $Status
-    if ($stats) {
-        $statusPart = "$Status  $stats"
-    }
+    if ($stats) { $statusPart = "$Status  $stats" }
 
     $available = $winWidth - 10
     $line1 = if ($statusPart.Length -gt $available) {
         $statusPart.Substring(0, $available)
-    }
-    else {
+    } else {
         $statusPart.PadRight($available)
     }
-
     $line1 += $pctLabel.PadLeft(8)
 
-    # Bar
     $barInner = [Math]::Max(10, $winWidth - 3)
     $indeterminate = $Percent -lt 0
     $filled = if ($indeterminate) { $barInner } else { [Math]::Min($barInner, [int](($barInner * $Percent) / 100)) }
-    $empty = $barInner - $filled
-    $bar = '|' + ([char]0x2588 -as [string]) * $filled + ([char]0x2591 -as [string]) * $empty + '|'
+    $empty  = $barInner - $filled
+    $bar    = '|' + ([char]0x2588 -as [string]) * $filled + ([char]0x2591 -as [string]) * $empty + '|'
 
     if ($script:_pbRow -lt 0) {
         $script:_pbRow = $Host.UI.RawUI.CursorPosition.Y
@@ -70,12 +61,10 @@ function Show-ProgressBar {
         [Console]::WriteLine()
     }
 
-    # Render Line 1
     [Console]::SetCursorPosition(0, $script:_pbRow)
     $Host.UI.RawUI.ForegroundColor = if ($indeterminate) { [ConsoleColor]::DarkCyan } else { [ConsoleColor]::Cyan }
     [Console]::Write($line1)
 
-    # Render Line 2
     [Console]::SetCursorPosition(0, $script:_pbRow + 1)
     $Host.UI.RawUI.ForegroundColor = if ($indeterminate) { [ConsoleColor]::DarkBlue } else { [ConsoleColor]::Blue }
     [Console]::Write($bar)
@@ -95,7 +84,7 @@ function Clear-ProgressBar {
 }
 
 # ================================================
-# ASCII Banner
+# ASCII Banner + Apps
 # ================================================
 Write-Host ""
 $lines = @(
@@ -120,9 +109,6 @@ foreach ($line in $lines) {
 [Console]::ResetColor()
 Write-Host ""
 
-# ================================================
-# Apps
-# ================================================
 $apps = @(
     @{ Name = 'Brave Browser'; Url = 'https://github.com/brave/brave-browser/releases/latest/download/BraveBrowserStandaloneSilentSetup.exe'; FileName = 'BraveSetup.exe'; Type = 'installer'; SilentArgs = '/silent /install' },
     @{ Name = 'Visual Studio Code'; Url = 'https://update.code.visualstudio.com/latest/win32-x64/stable'; FileName = 'VSCodeSetup.exe'; Type = 'installer'; SilentArgs = '/VERYSILENT /SUPPRESSMSGBOXES /MERGETASKS="!runcode" /DIR="{INSTDIR}"' },
@@ -146,8 +132,7 @@ function Download-File {
             $zip = [System.IO.Compression.ZipFile]::OpenRead($ariaZip)
             $entry = $zip.Entries | Where-Object { $_.Name -eq 'aria2c.exe' } | Select-Object -First 1
             if ($entry) { [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $aria2, $true) }
-        }
-        catch {} finally {
+        } catch {} finally {
             if (Test-Path $ariaZip) { Remove-Item $ariaZip -Force -EA SilentlyContinue }
         }
     }
@@ -172,9 +157,9 @@ function Download-File {
                 if (-not $line) { continue }
 
                 if ($line -match '\[#\w+\s+([\d.]+\w+)/([\d.]+\w+)\((\d+)%\).*DL:([\d.]+\w+)') {
-                    $done = $Matches[1]
+                    $done  = $Matches[1]
                     $total = $Matches[2]
-                    $pct = [int]$Matches[3]
+                    $pct   = [int]$Matches[3]
                     $speed = $Matches[4]
                     Show-ProgressBar -Status "Downloading $Label" -Percent $pct -Downloaded "$done/$total" -Speed "$speed/s"
                 }
@@ -203,7 +188,7 @@ function Download-File {
 # Partition + Selection + Installation
 # ================================================
 Write-Host "Which partition should the 'Apps' subfolder be created on?" -ForegroundColor Cyan
-$drives = Get-PSDrive -PSProvider FileSystem | Select-Object Name, @{n = 'FreeGB'; e = { [math]::Round($_.Free / 1GB, 2) } }
+$drives = Get-PSDrive -PSProvider FileSystem | Select-Object Name, @{n='FreeGB';e={[math]::Round($_.Free/1GB,2)}}
 
 for ($i = 0; $i -lt $drives.Count; $i++) {
     Write-Host "  [$($i+1)] $($drives[$i].Name): ($($drives[$i].FreeGB) GB free)"
@@ -244,12 +229,15 @@ foreach ($app in $selected) {
     if (Download-File -Url $app.Url -Destination $tmpFile -Label $app.Name) {
         try {
             if ($app.Type -eq 'installer') {
+                # Improved installer handling
                 Show-ProgressBar -Status "Installing $($app.Name)" -Percent -1
                 $args = $app.SilentArgs -replace '\{INSTDIR\}', "`"$appDir`""
-                Start-Process -FilePath $tmpFile -ArgumentList $args -Wait -PassThru -ErrorAction Stop | Out-Null
+                $process = Start-Process -FilePath $tmpFile -ArgumentList $args -Wait -PassThru -ErrorAction Stop
+                Start-Sleep -Seconds 2  # Give time for installer to finish
             }
             elseif ($app.Type -eq 'zip') {
-                Show-ProgressBar -Status "Extracting $($app.Name)" -Percent -1
+                # No progress bar for extraction as requested
+                Write-Host "  Extracting..." -ForegroundColor Cyan
                 Expand-Archive -Path $tmpFile -DestinationPath $appDir -Force
             }
             $results += [PSCustomObject]@{ App = $app.Name; Status = 'SUCCESS' }
@@ -263,8 +251,7 @@ foreach ($app in $selected) {
             Remove-Item $tmpFile -Force -ErrorAction SilentlyContinue
             Clear-ProgressBar 
         }
-    }
-    else {
+    } else {
         $results += [PSCustomObject]@{ App = $app.Name; Status = 'FAILED (Download)' }
     }
 }
