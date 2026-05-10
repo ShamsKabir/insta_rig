@@ -20,41 +20,62 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 # ================================================
-# Progress Bar
+# Unified Progress Bar (Download + Install)
 # ================================================
 $script:_pbRow = -1
-$script:_animJob = $null   # background animation job for indeterminate installs
-$script:_animTimer = $null
+$script:_animPos = 0
+$script:_animDir = 1
 
 function Show-ProgressBar {
     param(
         [string]$Status,
-        [int]$Percent = -1,
+        [int]$Percent = -1,           # -1 = indeterminate / animated
         [string]$Downloaded = '',
-        [string]$Speed = ''
+        [string]$Speed = '',
+        [switch]$IsInstalling
     )
 
     $winWidth = $Host.UI.RawUI.WindowSize.Width
-
     $stats = (@($Downloaded, $(if ($Speed) { "@ $Speed" })) | Where-Object { $_ }) -join '  '
-    $pctLabel = if ($Percent -lt 0) { ' ...  ' } else { "$Percent%" }
+    
+    $pctLabel = if ($Percent -lt 0) { ' ...  ' } else { "$Percent%".PadLeft(6) }
 
     $statusLine = if ($stats) { "$Status  $stats" } else { $Status }
-    $available = $winWidth - 10
+    $available = $winWidth - 12
     $line1 = if ($statusLine.Length -gt $available) {
         $statusLine.Substring(0, $available)
-    }
-    else {
+    } else {
         $statusLine.PadRight($available)
     }
-    $line1 += $pctLabel.PadLeft(8)
+    $line1 += $pctLabel
 
-    $barInner = [Math]::Max(10, $winWidth - 3)
-    $filled = if ($Percent -lt 0) { $barInner } else {
-        [Math]::Min($barInner, [int](($barInner * $Percent) / 100))
+    $barInner = [Math]::Max(10, $winWidth - 4)
+
+    # Build bar
+    if ($IsInstalling -and $Percent -lt 0) {
+        # Animated scanner effect for installation
+        $chars = [char[]]([char]0x2591 * $barInner)
+        $scanLen = [Math]::Max(8, [int]($barInner * 0.22))
+        for ($k = 0; $k -lt $scanLen; $k++) {
+            $idx = ($script:_animPos + $k) % $barInner
+            if ($idx -ge 0 -and $idx -lt $barInner) {
+                $chars[$idx] = [char]0x2588
+            }
+        }
+        $bar = '|' + (-join $chars) + '|'
+        
+        # Update scanner position
+        $script:_animPos += $script:_animDir * 3
+        if ($script:_animPos -gt $barInner + $scanLen) { $script:_animDir = -1 }
+        if ($script:_animPos -le -$scanLen) { $script:_animDir = 1 }
     }
-    $empty = $barInner - $filled
-    $bar = '|' + ([char]0x2588 -as [string]) * $filled + ([char]0x2591 -as [string]) * $empty + '|'
+    else {
+        # Normal filled progress bar
+        $filled = if ($Percent -lt 0) { $barInner } else {
+            [Math]::Min($barInner, [int](($barInner * $Percent) / 100))
+        }
+        $bar = '|' + ([char]0x2588 * $filled) + ([char]0x2591 * ($barInner - $filled)) + '|'
+    }
 
     if ($script:_pbRow -lt 0) {
         $script:_pbRow = $Host.UI.RawUI.CursorPosition.Y
@@ -62,13 +83,12 @@ function Show-ProgressBar {
         [Console]::WriteLine()
     }
 
-    $isIndeterminate = $Percent -lt 0
     [Console]::SetCursorPosition(0, $script:_pbRow)
-    $Host.UI.RawUI.ForegroundColor = if ($isIndeterminate) { [ConsoleColor]::DarkCyan } else { [ConsoleColor]::Cyan }
+    $Host.UI.RawUI.ForegroundColor = if ($IsInstalling) { [ConsoleColor]::DarkCyan } else { [ConsoleColor]::Cyan }
     [Console]::Write($line1)
 
     [Console]::SetCursorPosition(0, $script:_pbRow + 1)
-    $Host.UI.RawUI.ForegroundColor = if ($isIndeterminate) { [ConsoleColor]::DarkBlue } else { [ConsoleColor]::Blue }
+    $Host.UI.RawUI.ForegroundColor = if ($IsInstalling) { [ConsoleColor]::Blue } else { [ConsoleColor]::Cyan }
     [Console]::Write($bar)
 
     [Console]::ResetColor()
@@ -84,84 +104,8 @@ function Clear-ProgressBar {
     [Console]::Write($blank)
     [Console]::SetCursorPosition(0, $script:_pbRow)
     $script:_pbRow = -1
-    [Console]::ResetColor()
-}
-
-# Animated scanner bar for install phases (runs on main thread via a timer-tick loop)
-function Start-AnimatedBar {
-    param([string]$Status)
-
-    # Reserve two lines now so the row index is stable
-    if ($script:_pbRow -lt 0) {
-        $script:_pbRow = $Host.UI.RawUI.CursorPosition.Y
-        [Console]::WriteLine()
-        [Console]::WriteLine()
-    }
-
-    $pbRow = $script:_pbRow
-    $winWidth = $Host.UI.RawUI.WindowSize.Width
-    $barInner = [Math]::Max(10, $winWidth - 3)
-    $scanLen = [Math]::Max(6, [int]($barInner * 0.18))   # bright "scanner" window width
-
-    # Status line (written once; it doesn't change during animation)
-    $available = $winWidth - 10
-    $line1 = if ($Status.Length -gt $available) { $Status.Substring(0, $available) } else { $Status.PadRight($available) }
-    $line1 += ' ...  '.PadLeft(8)
-
-    [Console]::SetCursorPosition(0, $pbRow)
-    $Host.UI.RawUI.ForegroundColor = [ConsoleColor]::DarkCyan
-    [Console]::Write($line1)
-    [Console]::ResetColor()
-
-    # Store animation state in script-scope variables so Stop-AnimatedBar can clean up
     $script:_animPos = 0
-    $script:_animDir = 1
-    $script:_animStatus = $Status
-    $script:_animBarInner = $barInner
-    $script:_animScanLen = $scanLen
-    $script:_animPbRow = $pbRow
-
-    # Use a DispatcherTimer-free approach: .NET Timer on the thread pool,
-    # but we tick it manually via a helper called inside the wait loop.
-    $script:_animTimer = [System.Diagnostics.Stopwatch]::StartNew()
-    $script:_animLastMs = 0
-}
-
-function Invoke-AnimationTick {
-    # Called repeatedly from the wait loop; skips if <45 ms since last frame
-    if (-not $script:_animTimer) { return }
-    $now = $script:_animTimer.ElapsedMilliseconds
-    if (($now - $script:_animLastMs) -lt 45) { return }
-    $script:_animLastMs = $now
-
-    $inner = $script:_animBarInner
-    $scanLen = $script:_animScanLen
-    $pos = $script:_animPos
-
-    # Build bar: dim background with a bright scan window
-    $chars = [char[]]([char]0x2591 -as [string]) * $inner
-    for ($k = $pos; $k -lt ($pos + $scanLen) -and $k -lt $inner; $k++) {
-        $chars[$k] = [char]0x2588
-    }
-    $bar = '|' + (-join $chars) + '|'
-
-    [Console]::SetCursorPosition(0, $script:_animPbRow + 1)
-    $Host.UI.RawUI.ForegroundColor = [ConsoleColor]::Blue
-    [Console]::Write($bar)
     [Console]::ResetColor()
-
-    # Bounce direction
-    $script:_animPos += $script:_animDir * 2
-    if ($script:_animPos + $scanLen -ge $inner) { $script:_animDir = -1 }
-    if ($script:_animPos -le 0) { $script:_animDir = 1 }
-}
-
-function Stop-AnimatedBar {
-    if ($script:_animTimer) {
-        $script:_animTimer.Stop()
-        $script:_animTimer = $null
-    }
-    Clear-ProgressBar
 }
 
 # ================================================
@@ -200,16 +144,13 @@ $apps = @(
         FileName   = 'BraveSetup.exe'
         Type       = 'installer'
         SilentArgs = ''
-        NoInstDir  = $true   # installs to %LOCALAPPDATA%\BraveSoftware; no custom path supported
+        NoInstDir  = $true
     },
     [ordered]@{
         Name       = 'Visual Studio Code'
         Url        = 'https://update.code.visualstudio.com/latest/win32-x64/stable'
         FileName   = 'VSCodeSetup.exe'
         Type       = 'installer'
-        # /DIR= value must be quoted so Inno Setup receives the full path as one token.
-        # Without quotes, a space in the path (e.g. "Visual Studio Code") causes Inno
-        # to interpret "Studio" and "Code" as separate arguments -> creates two folders.
         SilentArgs = '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /MERGETASKS=!runcode /DIR="{INSTDIR}"'
     },
     [ordered]@{
@@ -221,7 +162,7 @@ $apps = @(
 )
 
 # ================================================
-# Download Helper  (aria2c with WebRequest fallback)
+# Download Helper
 # ================================================
 function Download-File {
     param(
@@ -234,7 +175,6 @@ function Download-File {
     $ariaZip = "$env:TEMP\aria2.zip"
     $ariaUrl = 'https://github.com/aria2/aria2/releases/download/release-1.37.0/aria2-1.37.0-win-64bit-build1.zip'
 
-    # --- Try to obtain aria2c if not already cached ---
     if (-not (Test-Path $aria2)) {
         try {
             Invoke-WebRequest -Uri $ariaUrl -OutFile $ariaZip -UseBasicParsing
@@ -245,15 +185,12 @@ function Download-File {
             }
             $zip.Dispose()
         }
-        catch {
-            # aria2 unavailable; will fall through to WebRequest
-        }
+        catch { }
         finally {
             if (Test-Path $ariaZip) { Remove-Item $ariaZip -Force -ErrorAction SilentlyContinue }
         }
     }
 
-    # --- Download with aria2c ---
     if (Test-Path $aria2) {
         try {
             if (Test-Path $Destination) { Remove-Item $Destination -Force }
@@ -263,15 +200,14 @@ function Download-File {
             $psi = New-Object System.Diagnostics.ProcessStartInfo
             $psi.FileName = $aria2
             $psi.Arguments = "--split=16 --max-connection-per-server=16 --min-split-size=5M " +
-            "--console-log-level=warn --summary-interval=1 " +
-            "--dir=`"$dir`" --out=`"$file`" `"$Url`""
+                             "--console-log-level=warn --summary-interval=1 " +
+                             "--dir=`"$dir`" --out=`"$file`" `"$Url`""
             $psi.RedirectStandardOutput = $true
-            $psi.RedirectStandardError = $true   # prevent stderr from blocking the process
+            $psi.RedirectStandardError = $true
             $psi.UseShellExecute = $false
             $psi.CreateNoWindow = $true
 
             $proc = [System.Diagnostics.Process]::Start($psi)
-            # Drain stderr asynchronously to avoid deadlock
             $proc.BeginErrorReadLine()
 
             while (-not $proc.HasExited) {
@@ -290,40 +226,33 @@ function Download-File {
             }
             $proc.WaitForExit()
 
-            if ($proc.ExitCode -eq 0 -and (Test-Path $Destination) -and
-                (Get-Item $Destination).Length -gt 0) {
+            if ($proc.ExitCode -eq 0 -and (Test-Path $Destination) -and (Get-Item $Destination).Length -gt 0) {
+                Clear-ProgressBar
                 return $true
             }
-            Write-Host "  aria2c exited with code $($proc.ExitCode); falling back." -ForegroundColor DarkYellow
         }
-        catch {
-            Write-Host "  aria2c error: $_" -ForegroundColor DarkYellow
-        }
+        catch { }
         finally {
             Clear-ProgressBar
         }
     }
 
-    # --- Fallback: Invoke-WebRequest (works on PS5 and PS7) ---
+    # Fallback
     try {
         Show-ProgressBar -Status "Downloading $Label (fallback)" -Percent -1
         Invoke-WebRequest -Uri $Url -OutFile $Destination -UseBasicParsing
-        if ((Test-Path $Destination) -and (Get-Item $Destination).Length -gt 0) {
-            return $true
-        }
-        return $false
+        Clear-ProgressBar
+        return (Test-Path $Destination) -and (Get-Item $Destination).Length -gt 0
     }
     catch {
         Write-Host "  Download failed: $_" -ForegroundColor Red
-        return $false
-    }
-    finally {
         Clear-ProgressBar
+        return $false
     }
 }
 
 # ================================================
-# Drive / Partition Selection
+# Drive Selection
 # ================================================
 Write-Host "Which partition should the 'Apps' subfolder be created on?" -ForegroundColor Cyan
 
@@ -338,8 +267,7 @@ $chosenDrive = $null
 do {
     $driveInput = Read-Host '  Select a number'
     $driveIdx = 0
-    if ([int]::TryParse($driveInput.Trim(), [ref]$driveIdx) -and
-        $driveIdx -ge 1 -and $driveIdx -le $drives.Count) {
+    if ([int]::TryParse($driveInput.Trim(), [ref]$driveIdx) -and $driveIdx -ge 1 -and $driveIdx -le $drives.Count) {
         $chosenDrive = $drives[$driveIdx - 1].Name
     }
     else {
@@ -366,13 +294,10 @@ do {
         $selected = $apps
     }
     else {
-        # Parse comma-separated integers, validate each, collect matching apps
-        $indices = $choice -split ',' |
-        ForEach-Object {
+        $indices = $choice -split ',' | ForEach-Object {
             $n = 0
             if ([int]::TryParse($_.Trim(), [ref]$n)) { $n }
-        } |
-        Where-Object { $_ -ge 1 -and $_ -le $apps.Count }
+        } | Where-Object { $_ -ge 1 -and $_ -le $apps.Count }
 
         if ($indices) {
             $selected = @($indices | ForEach-Object { $apps[$_ - 1] })
@@ -393,12 +318,9 @@ $totalTimer = [System.Diagnostics.Stopwatch]::StartNew()
 foreach ($app in $selected) {
     Write-Host "`n=== $($app.Name) ===" -ForegroundColor White
 
-    # NoInstDir apps (Brave, Spotify) manage their own install location.
-    # Do NOT create an empty subfolder for them; just notify the user.
     $appDir = $null
     if ($app.NoInstDir) {
         Write-Host "  Note: $($app.Name) does not support a custom install path." -ForegroundColor DarkYellow
-        Write-Host "        It will be installed to its default system location."  -ForegroundColor DarkYellow
     }
     else {
         $appDir = Join-Path $AppsRoot $app.Name
@@ -416,74 +338,67 @@ foreach ($app in $selected) {
     }
 
     $status = 'FAILED (Install)'
-    try{
-        switch ($app.Type){
+    try {
+        switch ($app.Type) {
 
-            'installer'{
-                # Substitute {INSTDIR} placeholder; appDir is $null for NoInstDir apps
-                $resolvedArgs = if ($app.NoInstDir -or -not $appDir){
+            'installer' {
+                $resolvedArgs = if ($app.NoInstDir -or -not $appDir) {
                     $app.SilentArgs
                 }
-                else{
+                else {
                     $app.SilentArgs -replace '\{INSTDIR\}', $appDir
                 }
 
-                # --- Normal elevated launch ---
                 $procArgs = @{ FilePath = $tmpFile; PassThru = $true; ErrorAction = 'Stop' }
-                if ($resolvedArgs){ $procArgs['ArgumentList'] = $resolvedArgs }
+                if ($resolvedArgs) { $procArgs['ArgumentList'] = $resolvedArgs }
+
                 $proc = Start-Process @procArgs
 
-                # Animate while installer runs
-                Start-AnimatedBar -Status "Installing $($app.Name)"
-                while (-not $proc.HasExited){
-                    Invoke-AnimationTick
-                    Start-Sleep -Milliseconds 30
+                # === Unified Install Progress ===
+                $installTimer = [System.Diagnostics.Stopwatch]::StartNew()
+                while (-not $proc.HasExited) {
+                    $simPercent = [Math]::Min(95, [int]($installTimer.Elapsed.TotalSeconds * 7))
+                    Show-ProgressBar -Status "Installing $($app.Name)" -Percent $simPercent -IsInstalling
+                    Start-Sleep -Milliseconds 180
                 }
-                Start-Sleep -Seconds 2
-                Stop-AnimatedBar
+
+                Show-ProgressBar -Status "Installing $($app.Name)" -Percent 100 -IsInstalling
+                Start-Sleep -Seconds 1
+                Clear-ProgressBar
 
                 $exitOk = ($proc.ExitCode -eq 0 -or $proc.ExitCode -eq 3010)
-                if ($exitOk){
+                if ($exitOk) {
                     $status = 'SUCCESS'
-                    Write-Host "  Installed successfully  " -ForegroundColor Green
+                    Write-Host "  Installed successfully" -ForegroundColor Green
                 }
-                else{
-                    Write-Host "  Installer returned  " -ForegroundColor Red
+                else {
+                    Write-Host "  Installer exited with code $($proc.ExitCode)" -ForegroundColor Red
                 }
             }
 
-            'zip'{
+            'zip' {
                 Write-Host '  Extracting...' -ForegroundColor Cyan
-
                 $stagingDir = Join-Path $env:TEMP "$($app.Name)_extract"
-                if (Test-Path $stagingDir){ Remove-Item $stagingDir -Recurse -Force }
+                if (Test-Path $stagingDir) { Remove-Item $stagingDir -Recurse -Force }
 
                 [System.IO.Compression.ZipFile]::ExtractToDirectory($tmpFile, $stagingDir)
 
-                # Flatten single top-level folder (e.g. Telegram Desktop\*)
                 $topItems = @(Get-ChildItem -LiteralPath $stagingDir)
-                if ($topItems.Count -eq 1 -and $topItems[0].PSIsContainer){
-                    Get-ChildItem -LiteralPath $topItems[0].FullName |
-                    Move-Item -Destination $appDir -Force
+                if ($topItems.Count -eq 1 -and $topItems[0].PSIsContainer) {
+                    Get-ChildItem -LiteralPath $topItems[0].FullName | Move-Item -Destination $appDir -Force
                     Remove-Item $topItems[0].FullName -Recurse -Force
                 }
-                else{
-                    Get-ChildItem -LiteralPath $stagingDir |
-                    Move-Item -Destination $appDir -Force
+                else {
+                    Get-ChildItem -LiteralPath $stagingDir | Move-Item -Destination $appDir -Force
                 }
                 Remove-Item $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
 
                 $status = 'SUCCESS'
                 Write-Host '  Extracted successfully' -ForegroundColor Green
             }
-
-            default{
-                Write-Host "  Unknown app type '$($app.Type)'" -ForegroundColor Red
-            }
         }
     }
     catch {
-        Stop-AnimatedBar
         Write-Host "  Error: $_" -ForegroundColor Red
     }
     finally {
@@ -499,8 +414,8 @@ $totalTimer.Stop()
 # Summary
 # ================================================
 Write-Host ("`n" + ('=' * 60)) -ForegroundColor DarkGray
-Write-Host '                    INSTALLATION SUMMARY'   -ForegroundColor White
-Write-Host ('=' * 60)                                   -ForegroundColor DarkGray
+Write-Host '                    INSTALLATION SUMMARY' -ForegroundColor White
+Write-Host ('=' * 60) -ForegroundColor DarkGray
 
 foreach ($r in $results) {
     $color = if ($r.Status -eq 'SUCCESS') { 'Green' } else { 'Red' }
@@ -508,5 +423,5 @@ foreach ($r in $results) {
 }
 
 Write-Host "`nTotal time:    $($totalTimer.Elapsed.ToString('mm\:ss'))" -ForegroundColor Yellow
-Write-Host "Apps location: $AppsRoot"                                   -ForegroundColor Cyan
+Write-Host "Apps location: $AppsRoot" -ForegroundColor Cyan
 Write-Host "`nDone!" -ForegroundColor Green
