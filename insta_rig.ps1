@@ -128,17 +128,15 @@ function Start-AnimatedBar {
 }
 
 function Invoke-AnimationTick {
-    # Called repeatedly from the wait loop; skips if <15 ms since last frame
     if (-not $script:_animTimer) { return }
     $now = $script:_animTimer.ElapsedMilliseconds
-    if (($now - $script:_animLastMs) -lt 15) { return } # Smoother 60FPS throttle
+    if (($now - $script:_animLastMs) -lt 15) { return }
     $script:_animLastMs = $now
 
     $inner = $script:_animBarInner
     $scanLen = $script:_animScanLen
     $pos = $script:_animPos
 
-    # Build bar: dim background with a bright scan window
     $chars = [char[]]([char]0x2591 -as [string]) * $inner
     for ($k = $pos; $k -lt ($pos + $scanLen) -and $k -lt $inner; $k++) {
         if ($k -ge 0) { $chars[$k] = [char]0x2588 }
@@ -150,10 +148,12 @@ function Invoke-AnimationTick {
     [Console]::Write($bar)
     [Console]::ResetColor()
 
-    # Bounce direction (Move 1 character at a time instead of 2 for smoothness)
-    $script:_animPos += $script:_animDir * 1
-    if ($script:_animPos + $scanLen -ge $inner) { $script:_animDir = -1 }
-    if ($script:_animPos -le 0) { $script:_animDir = 1 }
+    # Move continuously to the right
+    $script:_animPos += 1
+
+    if ($script:_animPos -ge $inner) { 
+        $script:_animPos = -$scanLen 
+    }
 }
 
 function Stop-AnimatedBar {
