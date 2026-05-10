@@ -23,6 +23,8 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 # Progress Bar
 # ================================================
 $script:_pbRow = -1
+$script:_animJob = $null   # background animation job for indeterminate installs
+$script:_animTimer = $null
 
 function Show-ProgressBar {
     param(
@@ -35,7 +37,7 @@ function Show-ProgressBar {
     $winWidth = $Host.UI.RawUI.WindowSize.Width
 
     $stats = (@($Downloaded, $(if ($Speed) { "@ $Speed" })) | Where-Object { $_ }) -join '  '
-    $pctLabel = if ($Percent -lt 0) { '  --  ' } else { "$Percent%" }
+    $pctLabel = if ($Percent -lt 0) { ' ...  ' } else { "$Percent%" }
 
     $statusLine = if ($stats) { "$Status  $stats" } else { $Status }
     $available = $winWidth - 10
@@ -85,6 +87,83 @@ function Clear-ProgressBar {
     [Console]::ResetColor()
 }
 
+# Animated scanner bar for install phases (runs on main thread via a timer-tick loop)
+function Start-AnimatedBar {
+    param([string]$Status)
+
+    # Reserve two lines now so the row index is stable
+    if ($script:_pbRow -lt 0) {
+        $script:_pbRow = $Host.UI.RawUI.CursorPosition.Y
+        [Console]::WriteLine()
+        [Console]::WriteLine()
+    }
+
+    $pbRow = $script:_pbRow
+    $winWidth = $Host.UI.RawUI.WindowSize.Width
+    $barInner = [Math]::Max(10, $winWidth - 3)
+    $scanLen = [Math]::Max(6, [int]($barInner * 0.18))   # bright "scanner" window width
+
+    # Status line (written once; it doesn't change during animation)
+    $available = $winWidth - 10
+    $line1 = if ($Status.Length -gt $available) { $Status.Substring(0, $available) } else { $Status.PadRight($available) }
+    $line1 += ' ...  '.PadLeft(8)
+
+    [Console]::SetCursorPosition(0, $pbRow)
+    $Host.UI.RawUI.ForegroundColor = [ConsoleColor]::DarkCyan
+    [Console]::Write($line1)
+    [Console]::ResetColor()
+
+    # Store animation state in script-scope variables so Stop-AnimatedBar can clean up
+    $script:_animPos = 0
+    $script:_animDir = 1
+    $script:_animStatus = $Status
+    $script:_animBarInner = $barInner
+    $script:_animScanLen = $scanLen
+    $script:_animPbRow = $pbRow
+
+    # Use a DispatcherTimer-free approach: .NET Timer on the thread pool,
+    # but we tick it manually via a helper called inside the wait loop.
+    $script:_animTimer = [System.Diagnostics.Stopwatch]::StartNew()
+    $script:_animLastMs = 0
+}
+
+function Invoke-AnimationTick {
+    # Called repeatedly from the wait loop; skips if <45 ms since last frame
+    if (-not $script:_animTimer) { return }
+    $now = $script:_animTimer.ElapsedMilliseconds
+    if (($now - $script:_animLastMs) -lt 45) { return }
+    $script:_animLastMs = $now
+
+    $inner = $script:_animBarInner
+    $scanLen = $script:_animScanLen
+    $pos = $script:_animPos
+
+    # Build bar: dim background with a bright scan window
+    $chars = [char[]]([char]0x2591 -as [string]) * $inner
+    for ($k = $pos; $k -lt ($pos + $scanLen) -and $k -lt $inner; $k++) {
+        $chars[$k] = [char]0x2588
+    }
+    $bar = '|' + (-join $chars) + '|'
+
+    [Console]::SetCursorPosition(0, $script:_animPbRow + 1)
+    $Host.UI.RawUI.ForegroundColor = [ConsoleColor]::Blue
+    [Console]::Write($bar)
+    [Console]::ResetColor()
+
+    # Bounce direction
+    $script:_animPos += $script:_animDir * 2
+    if ($script:_animPos + $scanLen -ge $inner) { $script:_animDir = -1 }
+    if ($script:_animPos -le 0) { $script:_animDir = 1 }
+}
+
+function Stop-AnimatedBar {
+    if ($script:_animTimer) {
+        $script:_animTimer.Stop()
+        $script:_animTimer = $null
+    }
+    Clear-ProgressBar
+}
+
 # ================================================
 # ASCII Banner
 # ================================================
@@ -120,14 +199,17 @@ $apps = @(
         Url        = 'https://github.com/brave/brave-browser/releases/latest/download/BraveBrowserStandaloneSilentSetup.exe'
         FileName   = 'BraveSetup.exe'
         Type       = 'installer'
-        SilentArgs = '/silent /install'
+        # BraveBrowserStandaloneSilentSetup.exe is a pre-configured silent wrapper.
+        # It takes NO arguments at all — any flag (including /install) causes 0x80070057.
+        # It always installs to %LOCALAPPDATA%\BraveSoftware; /DIR= is not supported.
+        SilentArgs = ''
+        NoInstDir  = $true
     },
     [ordered]@{
         Name       = 'Visual Studio Code'
         Url        = 'https://update.code.visualstudio.com/latest/win32-x64/stable'
         FileName   = 'VSCodeSetup.exe'
         Type       = 'installer'
-        # /DIR= tells Inno Setup where to install; no extra quotes needed inside the arg string
         SilentArgs = '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /MERGETASKS=!runcode /DIR={INSTDIR}'
     },
     [ordered]@{
@@ -337,21 +419,36 @@ foreach ($app in $selected) {
         switch ($app.Type) {
 
             'installer' {
-                Show-ProgressBar -Status "Installing $($app.Name)" -Percent -1
+                # Substitute {INSTDIR} placeholder (skipped for apps with NoInstDir = $true)
+                $resolvedArgs = if ($app.NoInstDir) {
+                    $app.SilentArgs
+                }
+                else {
+                    $app.SilentArgs -replace '\{INSTDIR\}', $appDir
+                }
 
-                # Substitute {INSTDIR} placeholder with the actual target directory
-                $resolvedArgs = $app.SilentArgs -replace '\{INSTDIR\}', $appDir
+                # Launch installer without -Wait so we can animate while it runs
+                $procArgs = @{
+                    FilePath    = $tmpFile
+                    PassThru    = $true
+                    ErrorAction = 'Stop'
+                }
+                if ($resolvedArgs) { $procArgs['ArgumentList'] = $resolvedArgs }
 
-                $proc = Start-Process -FilePath $tmpFile `
-                    -ArgumentList $resolvedArgs `
-                    -Wait -PassThru -ErrorAction Stop
+                $proc = Start-Process @procArgs
 
-                # Give the installer a moment to fully release file handles
-                Start-Sleep -Seconds 3
-                Clear-ProgressBar
+                # Animate a bouncing scanner bar until the installer finishes
+                Start-AnimatedBar -Status "Installing $($app.Name)"
+                while (-not $proc.HasExited) {
+                    Invoke-AnimationTick
+                    Start-Sleep -Milliseconds 30
+                }
+                # Let file handles settle
+                Start-Sleep -Seconds 2
+                Stop-AnimatedBar
 
                 if ($proc.ExitCode -eq 0 -or $proc.ExitCode -eq 3010) {
-                    # 3010 = success, reboot required (Spotify/VS Code)
+                    # 3010 = success, reboot required (common for VS Code)
                     $status = 'SUCCESS'
                     Write-Host "  Installed successfully (exit $($proc.ExitCode))" -ForegroundColor Green
                 }
@@ -392,7 +489,7 @@ foreach ($app in $selected) {
         }
     }
     catch {
-        Clear-ProgressBar
+        Stop-AnimatedBar
         Write-Host "  Error: $_" -ForegroundColor Red
     }
     finally {
