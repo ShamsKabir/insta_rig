@@ -57,9 +57,9 @@ function Show-ProgressBar {
     $bar = '|' + ([char]0x2588 -as [string]) * $filled + ([char]0x2591 -as [string]) * $empty + '|'
 
     if ($script:_pbRow -lt 0) {
-        $script:_pbRow = $Host.UI.RawUI.CursorPosition.Y
         [Console]::WriteLine()
         [Console]::WriteLine()
+        $script:_pbRow = $Host.UI.RawUI.CursorPosition.Y - 2
     }
 
     $isIndeterminate = $Percent -lt 0
@@ -93,17 +93,17 @@ function Start-AnimatedBar {
 
     # Reserve two lines now so the row index is stable
     if ($script:_pbRow -lt 0) {
-        $script:_pbRow = $Host.UI.RawUI.CursorPosition.Y
         [Console]::WriteLine()
         [Console]::WriteLine()
+        $script:_pbRow = $Host.UI.RawUI.CursorPosition.Y - 2
     }
 
     $pbRow = $script:_pbRow
     $winWidth = $Host.UI.RawUI.WindowSize.Width
     $barInner = [Math]::Max(10, $winWidth - 3)
-    $scanLen = [Math]::Max(6, [int]($barInner * 0.18))   # bright "scanner" window width
+    $scanLen = [Math]::Max(6, [int]($barInner * 0.18))   
 
-    # Status line (written once; it doesn't change during animation)
+    # Status line 
     $available = $winWidth - 10
     $line1 = if ($Status.Length -gt $available) { $Status.Substring(0, $available) } else { $Status.PadRight($available) }
     $line1 += ' ...  '.PadLeft(8)
@@ -120,9 +120,6 @@ function Start-AnimatedBar {
     $script:_animBarInner = $barInner
     $script:_animScanLen = $scanLen
     $script:_animPbRow = $pbRow
-
-    # Use a DispatcherTimer-free approach: .NET Timer on the thread pool,
-    # but we tick it manually via a helper called inside the wait loop.
     $script:_animTimer = [System.Diagnostics.Stopwatch]::StartNew()
     $script:_animLastMs = 0
 }
@@ -152,7 +149,7 @@ function Invoke-AnimationTick {
     $script:_animPos += 1
 
     if ($script:_animPos -ge $inner) { 
-        $script:_animPos = -$scanLen 
+        $script:_animPos = - $scanLen 
     }
 }
 
@@ -170,7 +167,7 @@ function Stop-AnimatedBar {
 Write-Host ''
 $lines = @(
     '_________ _      . _______ _________ _______    _______  _________ _______',
-    '\__   __/( (    /|(  ____ \\__   __/(  ___  )  (  ____ ) \__   __/(  ____ \',
+    '\__   __/( (    /|(  ____ \__   __/(  ___  )  (  ____ ) \__   __/(  ____ \',
     '   ) (   |  \  ( || (    \/   ) (   | (   ) |  | (    )|    ) (   | (    \/',
     '   | |   |   \ | || (_____    | |   | (___) |  | (____)|    | |   | |       ',
     '   | |   | (\ \) |(_____  )   | |   |  ___  |  |     __)    | |   | | ____ ',
@@ -207,9 +204,6 @@ $apps = @(
         Url        = 'https://update.code.visualstudio.com/latest/win32-x64/stable'
         FileName   = 'VSCodeSetup.exe'
         Type       = 'installer'
-        # /DIR= value must be quoted so Inno Setup receives the full path as one token.
-        # Without quotes, a space in the path (e.g. "Visual Studio Code") causes Inno
-        # to interpret "Studio" and "Code" as separate arguments -> creates two folders.
         SilentArgs = '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /MERGETASKS=!runcode /DIR="{INSTDIR}"'
     },
     [ordered]@{
@@ -217,7 +211,44 @@ $apps = @(
         Url      = 'https://telegram.org/dl/desktop/win64_portable'
         FileName = 'Telegram.zip'
         Type     = 'zip'
+    },
+    [ordered]@{
+        Name       = 'VLC Media Player'
+        Url        = 'https://get.videolan.org/vlc/3.0.23/win64/vlc-3.0.23-win64.exe'
+        FileName   = 'VLCSetup.exe'
+        Type       = 'installer'
+        SilentArgs = '/S /D={INSTDIR}'
+    },
+    [ordered]@{
+        Name       = 'Free Download Manager'
+        Url        = 'https://dn3.freedownloadmanager.org/6/latest/fdm6_x64_setup.exe'
+        FileName   = 'FDMSetup.exe'
+        Type       = 'installer'
+        SilentArgs = '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR="{INSTDIR}"'
+    },
+    [ordered]@{
+        Name       = 'Steam'
+        Url        = 'https://cdn.akamai.steamstatic.com/client/installer/SteamSetup.exe'
+        FileName   = 'SteamSetup.exe'
+        Type       = 'installer'
+        SilentArgs = '/S /D={INSTDIR}'
+    },
+    [ordered]@{
+        Name       = 'Discord'
+        Url        = 'https://discord.com/api/download?platform=win'
+        FileName   = 'DiscordSetup.exe'
+        Type       = 'installer'
+        SilentArgs = '-s'
+        NoInstDir  = $true   # installs to %LOCALAPPDATA%\Discord; no custom path supported
     }
+    # [ordered]@{
+        # Name       = 
+        # Url        = 
+        # FileName   = 
+        # Type       = 
+        # SilentArgs = 
+        # NoInstDir  = 
+    # }
 )
 
 # ================================================
@@ -394,7 +425,6 @@ foreach ($app in $selected) {
     Write-Host "`n=== $($app.Name) ===" -ForegroundColor White
 
     # NoInstDir apps (Brave, Spotify) manage their own install location.
-    # Do NOT create an empty subfolder for them; just notify the user.
     $appDir = $null
     if ($app.NoInstDir) {
         Write-Host "  Note: $($app.Name) does not support a custom install path." -ForegroundColor DarkYellow
@@ -416,26 +446,26 @@ foreach ($app in $selected) {
     }
 
     $status = 'FAILED (Install)'
-    try{
-        switch ($app.Type){
+    try {
+        switch ($app.Type) {
 
-            'installer'{
+            'installer' {
                 # Substitute {INSTDIR} placeholder; appDir is $null for NoInstDir apps
-                $resolvedArgs = if ($app.NoInstDir -or -not $appDir){
+                $resolvedArgs = if ($app.NoInstDir -or -not $appDir) {
                     $app.SilentArgs
                 }
-                else{
+                else {
                     $app.SilentArgs -replace '\{INSTDIR\}', $appDir
                 }
 
                 # --- Normal elevated launch ---
                 $procArgs = @{ FilePath = $tmpFile; PassThru = $true; ErrorAction = 'Stop' }
-                if ($resolvedArgs){ $procArgs['ArgumentList'] = $resolvedArgs }
+                if ($resolvedArgs) { $procArgs['ArgumentList'] = $resolvedArgs }
                 $proc = Start-Process @procArgs
 
                 # Animate while installer runs
                 Start-AnimatedBar -Status "Installing $($app.Name)"
-                while (-not $proc.HasExited){
+                while (-not $proc.HasExited) {
                     Invoke-AnimationTick
                     Start-Sleep -Milliseconds 30
                 }
@@ -443,31 +473,31 @@ foreach ($app in $selected) {
                 Stop-AnimatedBar
 
                 $exitOk = ($proc.ExitCode -eq 0 -or $proc.ExitCode -eq 3010)
-                if ($exitOk){
+                if ($exitOk) {
                     $status = 'SUCCESS'
                     Write-Host "  Installed successfully  " -ForegroundColor Green
                 }
-                else{
+                else {
                     Write-Host "  Installer returned  " -ForegroundColor Red
                 }
             }
 
-            'zip'{
+            'zip' {
                 Write-Host '  Extracting...' -ForegroundColor Cyan
 
                 $stagingDir = Join-Path $env:TEMP "$($app.Name)_extract"
-                if (Test-Path $stagingDir){ Remove-Item $stagingDir -Recurse -Force }
+                if (Test-Path $stagingDir) { Remove-Item $stagingDir -Recurse -Force }
 
                 [System.IO.Compression.ZipFile]::ExtractToDirectory($tmpFile, $stagingDir)
 
                 # Flatten single top-level folder (e.g. Telegram Desktop\*)
                 $topItems = @(Get-ChildItem -LiteralPath $stagingDir)
-                if ($topItems.Count -eq 1 -and $topItems[0].PSIsContainer){
+                if ($topItems.Count -eq 1 -and $topItems[0].PSIsContainer) {
                     Get-ChildItem -LiteralPath $topItems[0].FullName |
                     Move-Item -Destination $appDir -Force
                     Remove-Item $topItems[0].FullName -Recurse -Force
                 }
-                else{
+                else {
                     Get-ChildItem -LiteralPath $stagingDir |
                     Move-Item -Destination $appDir -Force
                 }
@@ -477,7 +507,7 @@ foreach ($app in $selected) {
                 Write-Host '  Extracted successfully' -ForegroundColor Green
             }
 
-            default{
+            default {
                 Write-Host "  Unknown app type '$($app.Type)'" -ForegroundColor Red
             }
         }
