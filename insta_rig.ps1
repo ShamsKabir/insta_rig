@@ -20,10 +20,18 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 # ================================================
+# Console Output Helpers
+# ================================================
+function Write-Info { param([string]$Message) Write-Host $Message -ForegroundColor Cyan }
+function Write-Ok { param([string]$Message) Write-Host $Message -ForegroundColor Green }
+function Write-Warn { param([string]$Message) Write-Host $Message -ForegroundColor Yellow }
+function Write-Note { param([string]$Message) Write-Host $Message -ForegroundColor DarkGray }
+function Write-Err { param([string]$Message) Write-Host $Message -ForegroundColor Red }
+
+# ================================================
 # Progress Bar
 # ================================================
 $script:_pbRow = -1
-$script:_animJob = $null   # background animation job for indeterminate installs
 $script:_animTimer = $null
 
 function Show-ProgressBar {
@@ -87,11 +95,11 @@ function Clear-ProgressBar {
     [Console]::ResetColor()
 }
 
-# Animated scanner bar for install phases (runs on main thread via a timer-tick loop)
+# Animated scanner bar for install phases (driven by a timer loop on the main thread)
 function Start-AnimatedBar {
     param([string]$Status)
 
-    # Reserve two lines now so the row index is stable
+    # Reserve two console lines so the row index stays stable.
     if ($script:_pbRow -lt 0) {
         [Console]::WriteLine()
         [Console]::WriteLine()
@@ -113,7 +121,7 @@ function Start-AnimatedBar {
     [Console]::Write($line1)
     [Console]::ResetColor()
 
-    # Store animation state in script-scope variables so Stop-AnimatedBar can clean up
+    # Store animation state in script scope so Stop-AnimatedBar can clean up.
     $script:_animPos = 0
     $script:_animDir = 1
     $script:_animStatus = $Status
@@ -145,7 +153,7 @@ function Invoke-AnimationTick {
     [Console]::Write($bar)
     [Console]::ResetColor()
 
-    # Move continuously to the right
+    # Advance scan position.
     $script:_animPos += 1
 
     if ($script:_animPos -ge $inner) { 
@@ -190,6 +198,156 @@ Write-Host ''
 # ================================================
 # App Definitions
 # ================================================
+$script:UninstallRegPaths = @(
+    'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+    'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*',
+    'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+    'HKCU:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+)
+
+function Get-InstalledProgramInfo {
+    param(
+        [Parameter(Mandatory = $true)][string[]]$MatchNames
+    )
+
+    $items = foreach ($p in $script:UninstallRegPaths) {
+        Get-ItemProperty -Path $p -ErrorAction SilentlyContinue |
+        Where-Object { $_.DisplayName -and $_.UninstallString }
+    }
+
+    foreach ($name in $MatchNames) {
+        $hit = $items | Where-Object { $_.DisplayName -like "*$name*" } | Select-Object -First 1
+        if ($hit) {
+            return [PSCustomObject]@{
+                DisplayName     = $hit.DisplayName
+                DisplayVersion  = $hit.DisplayVersion
+                InstallLocation = $hit.InstallLocation
+                Publisher       = $hit.Publisher
+                UninstallString = $hit.UninstallString
+                DisplayIcon     = $hit.DisplayIcon
+            }
+        }
+    }
+    return $null
+}
+
+function Get-InstallLocationFromUninstallEntry {
+    param([pscustomobject]$RegEntry)
+    if (-not $RegEntry) { return '' }
+    if ($RegEntry.InstallLocation -and (Test-Path -LiteralPath $RegEntry.InstallLocation)) {
+        return $RegEntry.InstallLocation
+    }
+
+    $candidates = @($RegEntry.DisplayIcon, $RegEntry.UninstallString) | Where-Object { $_ }
+    foreach ($c in $candidates) {
+        $s = [string]$c
+        if (-not $s) { continue }
+
+        # Extract first quoted path, else first token.
+        $path = $null
+        $m = [regex]::Match($s, '"([^"]+)"')
+        if ($m.Success) { $path = $m.Groups[1].Value } else { $path = ($s -split '\s+')[0] }
+        $path = $path.Trim()
+        if (-not $path) { continue }
+
+        # Strip trailing commas and arguments.
+        $path = $path.TrimEnd(',')
+        if (Test-Path -LiteralPath $path) {
+            $item = Get-Item -LiteralPath $path -ErrorAction SilentlyContinue
+            if ($item -and -not $item.PSIsContainer) {
+                return (Split-Path -Parent $path)
+            }
+            if ($item -and $item.PSIsContainer) { return $path }
+        }
+    }
+
+    return ''
+}
+
+function Test-DirectoryPopulated {
+    param([string]$Path)
+    try {
+        if (-not $Path) { return $false }
+        if (-not (Test-Path -LiteralPath $Path)) { return $false }
+        $count = (Get-ChildItem -LiteralPath $Path -Force -ErrorAction SilentlyContinue | Measure-Object).Count
+        return ($count -gt 0)
+    }
+    catch { return $false }
+}
+
+function Get-FileVersionSafe {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    try {
+        if (-not (Test-Path -LiteralPath $Path)) { return $null }
+        $v = (Get-Item -LiteralPath $Path).VersionInfo.ProductVersion
+        if (-not $v) { $v = (Get-Item -LiteralPath $Path).VersionInfo.FileVersion }
+        return $v
+    }
+    catch { return $null }
+}
+
+function ConvertTo-VersionSafe {
+    param([string]$VersionString)
+    if (-not $VersionString) { return $null }
+    $clean = ($VersionString -replace '[^\d\.].*$', '').Trim()
+    try { return [version]$clean } catch { return $null }
+}
+
+function Get-AppInstalledInfo {
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$App,
+        [Parameter(Mandatory = $true)][string]$AppsRoot
+    )
+
+    # ZIP apps: treat "installed" as extracted EXE exists.
+    if ($App.Type -eq 'zip') {
+        $appDir = Join-Path $AppsRoot $App.Name
+        $exeRel = $App.Detect.ExeRelativePath
+        $exe = if ($exeRel) { Join-Path $appDir $exeRel } else { $null }
+        if ($exe -and (Test-Path -LiteralPath $exe)) {
+            return [PSCustomObject]@{
+                Installed     = $true
+                VersionString = (Get-FileVersionSafe -Path $exe)
+                Source        = 'zip'
+                AppDir        = $appDir
+            }
+        }
+        return [PSCustomObject]@{ Installed = $false; VersionString = $null; Source = 'zip'; AppDir = $appDir }
+    }
+
+    # Installer apps: registry lookup first (best signal).
+    if ($App.Detect -and $App.Detect.MatchNames) {
+        $reg = Get-InstalledProgramInfo -MatchNames $App.Detect.MatchNames
+        if ($reg) {
+            $v = $reg.DisplayVersion
+            $loc = Get-InstallLocationFromUninstallEntry -RegEntry $reg
+            if (-not $v -and $loc -and $App.Detect.ExeRelativePath) {
+                $exe = Join-Path $loc $App.Detect.ExeRelativePath
+                $v = Get-FileVersionSafe -Path $exe
+            }
+            return [PSCustomObject]@{
+                Installed     = $true
+                VersionString = $v
+                Source        = 'registry'
+                InstallLocation = $loc
+                DisplayName   = $reg.DisplayName
+            }
+        }
+    }
+
+    return [PSCustomObject]@{ Installed = $false; VersionString = $null; Source = 'registry' }
+}
+
+function Get-LatestVersionForApp {
+    param([Parameter(Mandatory = $true)][hashtable]$App)
+    if (-not $App.LatestVersionScript) { return $null }
+    try {
+        $v = & $App.LatestVersionScript
+        return $v
+    }
+    catch { return $null }
+}
+
 $apps = @(
     [ordered]@{
         Name       = 'Brave Browser'
@@ -198,6 +356,15 @@ $apps = @(
         Type       = 'installer'
         SilentArgs = ''
         NoInstDir  = $true
+        Detect     = @{ MatchNames = @('Brave') }
+        AutoUpdateUrl = $true
+        LatestVersionScript = {
+            $h = @{ 'User-Agent' = 'insta_rig' }
+            $j = Invoke-RestMethod -Uri 'https://api.github.com/repos/brave/brave-browser/releases/latest' -Headers $h -ErrorAction Stop
+            $tag = [string]$j.tag_name
+            if ($tag -match '([0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?)') { return $Matches[1] }
+            return $null
+        }
     },
     [ordered]@{
         Name       = 'Visual Studio Code'
@@ -205,12 +372,26 @@ $apps = @(
         FileName   = 'VSCodeSetup.exe'
         Type       = 'installer'
         SilentArgs = '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /MERGETASKS=!runcode /DIR="{INSTDIR}"'
+        Detect     = @{ MatchNames = @('Microsoft Visual Studio Code', 'Visual Studio Code') }
+        LatestVersionScript = {
+            $u = 'https://update.code.visualstudio.com/api/update/win32-x64/stable/latest'
+            $j = Invoke-RestMethod -Uri $u -ErrorAction Stop
+            return $j.productVersion
+        }
     },
     [ordered]@{
         Name     = 'Telegram'
         Url      = 'https://telegram.org/dl/desktop/win64_portable'
         FileName = 'Telegram.zip'
         Type     = 'zip'
+        Detect   = @{ ExeRelativePath = 'Telegram.exe' }
+        LatestVersionScript = {
+            $h = @{ 'User-Agent' = 'insta_rig' }
+            $j = Invoke-RestMethod -Uri 'https://api.github.com/repos/telegramdesktop/tdesktop/releases/latest' -Headers $h -ErrorAction Stop
+            $tag = [string]$j.tag_name
+            if ($tag -match '([0-9]+\.[0-9]+(\.[0-9]+)?)') { return $Matches[1] }
+            return $null
+        }
     },
     [ordered]@{
         Name             = 'VLC Media Player'
@@ -228,13 +409,32 @@ $apps = @(
         FileName         = 'VLCSetup.exe'
         Type             = 'installer'
         SilentArgs       = '/S /D={INSTDIR}'
+        Detect           = @{ MatchNames = @('VLC media player', 'VLC'); ExeRelativePath = 'vlc.exe' }
+        LatestVersionScript = {
+            $p = Invoke-WebRequest -Uri 'https://www.videolan.org/vlc/' -UseBasicParsing
+            $m = [regex]::Match($p.Content, 'Version\s+([0-9]+\.[0-9]+\.[0-9]+)')
+            if ($m.Success) { return $m.Groups[1].Value }
+            $p2 = Invoke-WebRequest -Uri 'https://www.videolan.org/vlc/download-windows.html' -UseBasicParsing
+            $m2 = [regex]::Match($p2.Content, 'Version\s+([0-9]+\.[0-9]+\.[0-9]+)')
+            if ($m2.Success) { return $m2.Groups[1].Value }
+            return $null
+        }
     },
     [ordered]@{
         Name       = 'Free Download Manager'
-        Url        = 'https://dn3.freedownloadmanager.org/6/latest/fdm6_x64_setup.exe'
+        Url        = 'https://files2.freedownloadmanager.org/6/latest/fdm_x64_setup.exe'
         FileName   = 'FDMSetup.exe'
         Type       = 'installer'
         SilentArgs = '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR="{INSTDIR}"'
+        Detect     = @{ MatchNames = @('Free Download Manager') }
+        LatestVersionScript = {
+            $p = Invoke-WebRequest -Uri 'https://freedownloadmanager.org/download.htm' -UseBasicParsing
+            $m = [regex]::Match($p.Content, 'FDM\s+([0-9]+\.[0-9]+\.[0-9]+)')
+            if ($m.Success) { return $m.Groups[1].Value }
+            $m2 = [regex]::Match($p.Content, 'Stable\s+release[\s\S]*?FDM\s+([0-9]+\.[0-9]+\.[0-9]+)', 'IgnoreCase')
+            if ($m2.Success) { return $m2.Groups[1].Value }
+            return $null
+        }
     },
     [ordered]@{
         Name       = 'Steam'
@@ -242,6 +442,8 @@ $apps = @(
         FileName   = 'SteamSetup.exe'
         Type       = 'installer'
         SilentArgs = '/S /D={INSTDIR}'
+        Detect     = @{ MatchNames = @('Steam') }
+        SkipUpdateIfInstalled = $true
     },
     [ordered]@{
         Name       = 'Discord'
@@ -250,6 +452,8 @@ $apps = @(
         Type       = 'installer'
         SilentArgs = '-s'
         NoInstDir  = $true 
+        Detect     = @{ MatchNames = @('Discord') }
+        SkipUpdateIfInstalled = $true
     },
     [ordered]@{
         Name             = 'Okular'
@@ -264,6 +468,7 @@ $apps = @(
         Type             = 'installer'
         SilentArgs       = '/S /D={INSTDIR}'
         NoInstDir        = $false 
+        Detect           = @{ MatchNames = @('Okular'); ExeRelativePath = 'bin\okular.exe' }
     }
 )
 
@@ -341,10 +546,10 @@ function Download-File {
                 (Get-Item $Destination).Length -gt 0) {
                 return $true
             }
-            Write-Host "  aria2c exited with code $($proc.ExitCode); falling back." -ForegroundColor DarkYellow
+            Write-Warn "  aria2c exit code $($proc.ExitCode); using fallback downloader."
         }
         catch {
-            Write-Host "  aria2c error: $_" -ForegroundColor DarkYellow
+            Write-Warn "  aria2c failed; using fallback downloader."
         }
         finally {
             Clear-ProgressBar
@@ -361,7 +566,7 @@ function Download-File {
         return $false
     }
     catch {
-        Write-Host "  Download failed: $_" -ForegroundColor Red
+        Write-Err "  Download failed: $($_.Exception.Message)"
         return $false
     }
     finally {
@@ -372,7 +577,7 @@ function Download-File {
 # ================================================
 # Drive / Partition Selection
 # ================================================
-Write-Host "Which partition should the 'Apps' subfolder be created on?" -ForegroundColor Cyan
+Write-Info "Choose a drive for Apps folder (e.g. D:\\Apps):"
 
 $drives = @(Get-PSDrive -PSProvider FileSystem |
     Select-Object Name, @{ n = 'FreeGB'; e = { [math]::Round($_.Free / 1GB, 2) } })
@@ -390,7 +595,7 @@ do {
         $chosenDrive = $drives[$driveIdx - 1].Name
     }
     else {
-        Write-Host '  Invalid choice. Please enter a valid number.' -ForegroundColor Red
+        Write-Warn '  Invalid choice. Enter a valid number.'
     }
 } while (-not $chosenDrive)
 
@@ -400,7 +605,7 @@ if (-not (Test-Path $AppsRoot)) { New-Item -ItemType Directory -Path $AppsRoot -
 # ================================================
 # App Selection
 # ================================================
-Write-Host "`nSelect apps to install (e.g. 1,3  or  A for all):" -ForegroundColor Cyan
+Write-Info "`nSelect apps (e.g. 1,3 or A for all):"
 for ($i = 0; $i -lt $apps.Count; $i++) {
     Write-Host "  [$($i + 1)] $($apps[$i].Name)"
 }
@@ -427,7 +632,7 @@ do {
     }
 
     if (-not $selected) {
-        Write-Host '  No valid selection. Try again.' -ForegroundColor Red
+        Write-Warn '  No valid selection. Try again.'
     }
 } while (-not $selected)
 
@@ -438,32 +643,79 @@ $results = [System.Collections.Generic.List[PSCustomObject]]::new()
 $totalTimer = [System.Diagnostics.Stopwatch]::StartNew()
 
 foreach ($app in $selected) {
-    Write-Host "`n=== $($app.Name) ===" -ForegroundColor White
+    Write-Host "`n[$($app.Name)]" -ForegroundColor White
 
-    # --- NEW: Dynamic URL Resolution ---
+    # Resolve dynamic download URL, when provided.
     if ($app.DynamicUrlScript) {
-        Write-Host "  Resolving latest download link..." -ForegroundColor DarkCyan
+        Write-Note "  Resolving latest download URL..."
         try {
             $app.Url = & $app.DynamicUrlScript
             if (-not $app.Url) { throw "Script block returned an empty URL." }
         }
         catch {
-            Write-Host "  Error resolving URL: $_" -ForegroundColor Red
+            Write-Err "  URL resolve failed: $($_.Exception.Message)"
             $results.Add([PSCustomObject]@{ App = $app.Name; Status = 'FAILED (URL Resolve)' })
             continue
         }
     }
-    # -----------------------------------
+
+    # Detect installation and, where possible, compare versions.
+    $installedInfo = Get-AppInstalledInfo -App $app -AppsRoot $AppsRoot
+    $installedVersion = ConvertTo-VersionSafe -VersionString $installedInfo.VersionString
+
+    $latestVersionString = Get-LatestVersionForApp -App $app
+    $latestVersion = ConvertTo-VersionSafe -VersionString $latestVersionString
+
+    if ($installedInfo.Installed) {
+        if ($app.SkipUpdateIfInstalled) {
+            Write-Ok "  Installed. Skipping."
+            $loc = if ($installedInfo.AppDir) { $installedInfo.AppDir } elseif ($installedInfo.InstallLocation) { $installedInfo.InstallLocation } else { '' }
+            $results.Add([PSCustomObject]@{ App = $app.Name; Status = 'SKIPPED (Installed)'; Location = $loc })
+            continue
+        }
+
+        $verLabel = if ($installedInfo.VersionString) { $installedInfo.VersionString } else { 'unknown version' }
+        Write-Ok "  Installed: $verLabel"
+
+        if ($latestVersion -and $installedVersion) {
+            if ($installedVersion -ge $latestVersion) {
+                Write-Ok "  Up to date. Skipping. (latest: $latestVersionString)"
+                $loc = if ($installedInfo.AppDir) { $installedInfo.AppDir } elseif ($installedInfo.InstallLocation) { $installedInfo.InstallLocation } else { '' }
+                $results.Add([PSCustomObject]@{ App = $app.Name; Status = 'SKIPPED (Up-to-date)'; Location = $loc })
+                continue
+            }
+            else {
+                Write-Warn "  Outdated. Updating... (latest: $latestVersionString)"
+            }
+        }
+        elseif ($latestVersionString) {
+            Write-Warn "  Updating... (latest: $latestVersionString; local version unknown)"
+        }
+        else {
+            if ($app.AutoUpdateUrl -or $app.DynamicUrlScript) {
+                Write-Warn "  Unable to compare version. Updating..."
+            }
+            else {
+                Write-Warn "  Skipping (installed; latest version unknown)."
+                $loc = if ($installedInfo.AppDir) { $installedInfo.AppDir } elseif ($installedInfo.InstallLocation) { $installedInfo.InstallLocation } else { '' }
+                $results.Add([PSCustomObject]@{ App = $app.Name; Status = 'SKIPPED (Already installed)'; Location = $loc })
+                continue
+            }
+        }
+    }
 
     # NoInstDir apps manage their own install location.
     $appDir = $null
     if ($app.NoInstDir) {
-        Write-Host "  Note: $($app.Name) does not support a custom install path." -ForegroundColor DarkYellow
-        Write-Host "        It will be installed to its default system location."  -ForegroundColor DarkYellow
+        Write-Note "  Install path: default (custom path not supported)."
     }
     else {
         $appDir = Join-Path $AppsRoot $app.Name
-        if (-not (Test-Path $appDir)) { New-Item -ItemType Directory -Path $appDir -Force | Out-Null }
+        # Don't pre-create folders for installers (some ignore /DIR).
+        # Create the folder only when required (ZIP extraction).
+        if ($app.Type -eq 'zip' -and -not (Test-Path $appDir)) {
+            New-Item -ItemType Directory -Path $appDir -Force | Out-Null
+        }
     }
 
     $tmpFile = Join-Path $env:TEMP $app.FileName
@@ -472,11 +724,12 @@ foreach ($app in $selected) {
     $downloaded = Download-File -Url $app.Url -Destination $tmpFile -Label $app.Name
 
     if (-not $downloaded) {
-        $results.Add([PSCustomObject]@{ App = $app.Name; Status = 'FAILED (Download)' })
+        $results.Add([PSCustomObject]@{ App = $app.Name; Status = 'FAILED (Download)'; Location = '' })
         continue
     }
 
     $status = 'FAILED (Install)'
+    $finalLocation = ''
     try {
         switch ($app.Type) {
 
@@ -489,7 +742,7 @@ foreach ($app in $selected) {
                     $app.SilentArgs -replace '\{INSTDIR\}', $appDir
                 }
 
-                # --- Normal elevated launch ---
+                # Launch installer (already elevated).
                 $procArgs = @{ FilePath = $tmpFile; PassThru = $true; ErrorAction = 'Stop' }
                 if ($resolvedArgs) { $procArgs['ArgumentList'] = $resolvedArgs }
                 $proc = Start-Process @procArgs
@@ -506,15 +759,29 @@ foreach ($app in $selected) {
                 $exitOk = ($proc.ExitCode -eq 0 -or $proc.ExitCode -eq 3010)
                 if ($exitOk) {
                     $status = 'SUCCESS'
-                    Write-Host "  Installed successfully  " -ForegroundColor Green
+                    Write-Ok "  Done."
+
+                    # If installer supported custom dir, it should have created it.
+                    # Avoid creating empty folders when installers ignore /DIR.
+
+                    $post = Get-AppInstalledInfo -App $app -AppsRoot $AppsRoot
+                    if ($appDir -and (Test-DirectoryPopulated -Path $appDir)) {
+                        $finalLocation = $appDir
+                    }
+                    elseif ($post.InstallLocation) {
+                        $finalLocation = $post.InstallLocation
+                    }
+                    else {
+                        $finalLocation = ''
+                    }
                 }
                 else {
-                    Write-Host "  Installer returned code $($proc.ExitCode)" -ForegroundColor Red
+                    Write-Err "  Installer exit code: $($proc.ExitCode)"
                 }
             }
 
             'zip' {
-                Write-Host '  Extracting...' -ForegroundColor Cyan
+                Write-Note '  Extracting...'
 
                 $stagingDir = Join-Path $env:TEMP "$($app.Name)_extract"
                 if (Test-Path $stagingDir) { Remove-Item $stagingDir -Recurse -Force }
@@ -535,23 +802,29 @@ foreach ($app in $selected) {
                 Remove-Item $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
 
                 $status = 'SUCCESS'
-                Write-Host '  Extracted successfully' -ForegroundColor Green
+                Write-Ok '  Done.'
+                $finalLocation = $appDir
             }
 
             default {
-                Write-Host "  Unknown app type '$($app.Type)'" -ForegroundColor Red
+                Write-Err "  Unknown app type: $($app.Type)"
             }
         }
     }
     catch {
         Stop-AnimatedBar
-        Write-Host "  Error: $_" -ForegroundColor Red
+        Write-Err "  Error: $($_.Exception.Message)"
     }
     finally {
         Remove-Item $tmpFile -Force -ErrorAction SilentlyContinue
     }
 
-    $results.Add([PSCustomObject]@{ App = $app.Name; Status = $status })
+    if (-not $finalLocation) {
+        $post = Get-AppInstalledInfo -App $app -AppsRoot $AppsRoot
+        $finalLocation = if ($post.AppDir) { $post.AppDir } elseif ($post.InstallLocation) { $post.InstallLocation } else { '' }
+    }
+
+    $results.Add([PSCustomObject]@{ App = $app.Name; Status = $status; Location = $finalLocation })
 }
 
 $totalTimer.Stop()
@@ -564,10 +837,16 @@ Write-Host '                    INSTALLATION SUMMARY'   -ForegroundColor White
 Write-Host ('=' * 60)                                   -ForegroundColor DarkGray
 
 foreach ($r in $results) {
-    $color = if ($r.Status -eq 'SUCCESS') { 'Green' } else { 'Red' }
-    Write-Host "  $($r.Status.PadRight(30)) $($r.App)" -ForegroundColor $color
+    $color =
+    if ($r.Status -eq 'SUCCESS') { 'Green' }
+    elseif ($r.Status -like 'FAILED*') { 'Red' }
+    else { 'Yellow' }
+
+    $loc = if ($r.Location) { $r.Location } else { '-' }
+    Write-Host "  $($r.Status.PadRight(30)) $($r.App)" -ForegroundColor $color -NoNewline
+    Write-Host "  [$loc]" -ForegroundColor DarkGray
 }
 
-Write-Host "`nTotal time:    $($totalTimer.Elapsed.ToString('mm\:ss'))" -ForegroundColor Yellow
-Write-Host "Apps location: $AppsRoot"                                   -ForegroundColor Cyan
-Write-Host "`nDone!" -ForegroundColor Green
+Write-Host "`nTotal time: $($totalTimer.Elapsed.ToString('mm\:ss'))" -ForegroundColor DarkGray
+Write-Host "Apps folder: $AppsRoot" -ForegroundColor DarkGray
+Write-Ok "`nDone."
