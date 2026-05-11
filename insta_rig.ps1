@@ -167,9 +167,9 @@ function Stop-AnimatedBar {
 Write-Host ''
 $lines = @(
     '_________ _      . _______ _________ _______    _______  _________ _______',
-    '\__   __/( (    /|(  ____ \\__   __/(  ___  )  (  ____ ) \__   __/(  ____ \',
-    '   ) (   |  \  ( || (    \/   ) (   | (   ) |  | (    )|    ) (   | (    \/',
-    '   | |   |   \ | || (_____    | |   | (___) |  | (____)|    | |   | |       ',
+    '\__   __/( (    /|(  ____ \\__   __/(  ___  )  (  ___  ) \__   __/(  ____ \',
+    '   ) (   |  \  ( || (    \/   ) (   | (   ) |  | (   ) |    ) (   | (    \/',
+    '   | |   |   \ | || (_____    | |   | (___) |  | (___) |    | |   | |       ',
     '   | |   | (\ \) |(_____  )   | |   |  ___  |  |     __)    | |   | | ____ ',
     '   | |   | | \   |      ) |   | |   | (   ) |  | (\ (       | |   | | \_  )',
     '___) (___| )  \  |/\____) |   | |   | )   ( |  | ) \ \__ ___) (___| (___) |',
@@ -197,7 +197,7 @@ $apps = @(
         FileName   = 'BraveSetup.exe'
         Type       = 'installer'
         SilentArgs = ''
-        NoInstDir  = $true   # installs to %LOCALAPPDATA%\BraveSoftware; no custom path supported
+        NoInstDir  = $true
     },
     [ordered]@{
         Name       = 'Visual Studio Code'
@@ -213,11 +213,21 @@ $apps = @(
         Type     = 'zip'
     },
     [ordered]@{
-        Name       = 'VLC Media Player'
-        Url        = 'https://get.videolan.org/vlc/3.0.23/win64/vlc-3.0.23-win64.exe'
-        FileName   = 'VLCSetup.exe'
-        Type       = 'installer'
-        SilentArgs = '/S /D={INSTDIR}'
+        Name             = 'VLC Media Player'
+        Url              = ''
+        DynamicUrlScript = {
+            $DownloadPage = Invoke-WebRequest -Uri 'https://www.videolan.org/vlc/download-windows.html' -UseBasicParsing
+            $LatestLink = ($DownloadPage.Links | Where-Object href -match 'win64\.exe$').href | Select-Object -First 1
+
+            if ($LatestLink -match '^//') {
+                $LatestLink = "https:$LatestLink"
+            }
+            
+            return $LatestLink
+        }
+        FileName         = 'VLCSetup.exe'
+        Type             = 'installer'
+        SilentArgs       = '/S /D={INSTDIR}'
     },
     [ordered]@{
         Name       = 'Free Download Manager'
@@ -239,16 +249,22 @@ $apps = @(
         FileName   = 'DiscordSetup.exe'
         Type       = 'installer'
         SilentArgs = '-s'
-        NoInstDir  = $true   # installs to %LOCALAPPDATA%\Discord; no custom path supported
+        NoInstDir  = $true 
+    },
+    [ordered]@{
+        Name             = 'Okular'
+        Url              = '' 
+        DynamicUrlScript = {
+            $BaseUrl = 'https://cdn.kde.org/ci-builds/graphics/okular/master/windows/'
+            $WebResponse = Invoke-WebRequest -Uri $BaseUrl -UseBasicParsing
+            $LatestExe = ($WebResponse.Links | Where-Object href -match '\.exe$').href | Sort-Object | Select-Object -Last 1
+            return $BaseUrl + $LatestExe
+        }
+        FileName         = 'OkularSetup.exe'
+        Type             = 'installer'
+        SilentArgs       = '/S /D={INSTDIR}'
+        NoInstDir        = $false 
     }
-    # [ordered]@{
-        # Name       = 
-        # Url        = 
-        # FileName   = 
-        # Type       = 
-        # SilentArgs = 
-        # NoInstDir  = 
-    # }
 )
 
 # ================================================
@@ -424,7 +440,22 @@ $totalTimer = [System.Diagnostics.Stopwatch]::StartNew()
 foreach ($app in $selected) {
     Write-Host "`n=== $($app.Name) ===" -ForegroundColor White
 
-    # NoInstDir apps (Brave, Spotify) manage their own install location.
+    # --- NEW: Dynamic URL Resolution ---
+    if ($app.DynamicUrlScript) {
+        Write-Host "  Resolving latest download link..." -ForegroundColor DarkCyan
+        try {
+            $app.Url = & $app.DynamicUrlScript
+            if (-not $app.Url) { throw "Script block returned an empty URL." }
+        }
+        catch {
+            Write-Host "  Error resolving URL: $_" -ForegroundColor Red
+            $results.Add([PSCustomObject]@{ App = $app.Name; Status = 'FAILED (URL Resolve)' })
+            continue
+        }
+    }
+    # -----------------------------------
+
+    # NoInstDir apps manage their own install location.
     $appDir = $null
     if ($app.NoInstDir) {
         Write-Host "  Note: $($app.Name) does not support a custom install path." -ForegroundColor DarkYellow
@@ -478,7 +509,7 @@ foreach ($app in $selected) {
                     Write-Host "  Installed successfully  " -ForegroundColor Green
                 }
                 else {
-                    Write-Host "  Installer returned  " -ForegroundColor Red
+                    Write-Host "  Installer returned code $($proc.ExitCode)" -ForegroundColor Red
                 }
             }
 
