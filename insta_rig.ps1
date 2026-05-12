@@ -490,6 +490,13 @@ $apps = @(
         SilentArgs = '/S /D={INSTDIR}'
         NoInstDir  = $false
         Detect     = @{ MatchNames = @('Okular'); ExeRelativePath = 'bin\okular.exe' }
+        LatestVersionScript = {
+            $BaseUrl = 'https://cdn.kde.org/ci-builds/graphics/okular/master/windows/'
+            $r = Invoke-WebRequest -Uri $BaseUrl -UseBasicParsing -ErrorAction Stop
+            $latest = ($r.Links | Where-Object href -match '\.exe$').href | Sort-Object | Select-Object -Last 1
+            if ($latest -match '([0-9]+\.[0-9]+\.[0-9]+)') { return $Matches[1] }
+            return $null
+        }
     },
 
     # ---- Media ----
@@ -577,6 +584,13 @@ $apps = @(
         Type       = 'zip'
         Detect     = @{ ExeRelativePath = 'Telegram.exe' }
         SkipUpdateIfInstalled = $true
+        LatestVersionScript = {
+            $j = Invoke-RestMethod -Uri 'https://api.github.com/repos/telegramdesktop/tdesktop/releases/latest' `
+                     -Headers @{ 'User-Agent' = 'insta_rig' } -ErrorAction Stop
+            $tag = [string]$j.tag_name
+            if ($tag -match '([0-9]+\.[0-9]+(\.[0-9]+)?)') { return $Matches[1] }
+            return $null
+        }
     },
     [ordered]@{
         Name       = 'Discord'
@@ -587,6 +601,12 @@ $apps = @(
         NoInstDir  = $true
         Detect     = @{ MatchNames = @('Discord') }
         SkipUpdateIfInstalled = $true
+        LatestVersionScript = {
+            $j = Invoke-RestMethod -Uri 'https://discord.com/api/updates/stable?platform=win' `
+                     -ErrorAction Stop
+            if ($j.name -match '([0-9]+\.[0-9]+\.[0-9]+)') { return $Matches[1] }
+            return $null
+        }
     },
 
     # ---- Gaming ----
@@ -598,6 +618,12 @@ $apps = @(
         SilentArgs = '/S /D={INSTDIR}'
         Detect     = @{ MatchNames = @('Steam') }
         SkipUpdateIfInstalled = $true
+        LatestVersionScript = {
+            $p = Invoke-WebRequest -Uri 'https://store.steampowered.com/stats/' -UseBasicParsing -ErrorAction Stop
+            $m = [regex]::Match($p.Content, 'Steam Client Build:\s*([0-9]+)')
+            if ($m.Success) { return $m.Groups[1].Value }
+            return $null
+        }
     }
 )
 
@@ -925,7 +951,15 @@ foreach ($app in $selected) {
     if ($installedInfo.Installed) {
         if ($app.SkipUpdateIfInstalled) {
             Write-Ok "  Installed. Skipping."
-            $loc = if ($installedInfo.AppDir) { $installedInfo.AppDir } elseif ($installedInfo.InstallLocation) { $installedInfo.InstallLocation } else { '' }
+            $loc = if ($installedInfo.AppDir) { $installedInfo.AppDir }
+                   elseif ($installedInfo.InstallLocation) { $installedInfo.InstallLocation }
+                   elseif ($app.Detect -and $app.Detect.MatchNames) {
+                       # NoInstDir apps (e.g. Discord) don't write InstallLocation to the registry.
+                       # Derive the install folder from DisplayIcon / UninstallString instead.
+                       $reg = Get-InstalledProgramInfo -MatchNames $app.Detect.MatchNames
+                       if ($reg) { Get-InstallLocationFromUninstallEntry -RegEntry $reg } else { '' }
+                   }
+                   else { '' }
             $results.Add([PSCustomObject]@{ App = $app.Name; Status = 'SKIPPED (Installed)'; Location = $loc })
             continue
         }
