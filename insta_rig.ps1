@@ -25,15 +25,14 @@ $ErrorActionPreference = 'Stop'
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
         [Security.Principal.WindowsBuiltInRole]::Administrator)) {
     $shell = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh' } else { 'powershell' }
-    $wt = Get-Command wt -ErrorAction SilentlyContinue
+    $wt    = Get-Command wt -ErrorAction SilentlyContinue
     # Pass -AutoElevated so the relaunched elevated session knows to pause at the end.
     $relaunchArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -AutoElevated"
     if ($wt) {
         # Open a brand-new, separate Windows Terminal window using '-w new'.
         # The elevated session is fully independent — no shared window lifetime.
         Start-Process wt -Verb RunAs -ArgumentList "-w new $shell $relaunchArgs"
-    }
-    else {
+    } else {
         # No Windows Terminal available; launch the shell directly in a new elevated window.
         Start-Process $shell -Verb RunAs -ArgumentList $relaunchArgs
     }
@@ -60,34 +59,6 @@ function Write-Ok { param([string]$Message) Write-Host $Message -ForegroundColor
 function Write-Warn { param([string]$Message) Write-Host $Message -ForegroundColor Yellow }
 function Write-Note { param([string]$Message) Write-Host $Message -ForegroundColor DarkGray }
 function Write-Err { param([string]$Message) Write-Host $Message -ForegroundColor Red }
-function Enable-FdmSilentInstallHook {
-    $hookScript = Join-Path $env:TEMP 'insta_rig_fdm_install_hook.ps1'
-    @'
-if (-not $args -or $args.Count -eq 0) { exit 0 }
-$exe = $args[0].Trim('"')
-$fwd = @()
-if ($args.Count -gt 1) { $fwd = @($args[1..($args.Count - 1)]) }
-if ($fwd -contains '--install' -and $fwd -notcontains '--silent') {
-    $fwd = @($fwd) + '--silent'
-}
-$p = Start-Process -FilePath $exe -ArgumentList $fwd -PassThru -Wait -WindowStyle Hidden
-exit $p.ExitCode
-'@ | Set-Content -LiteralPath $hookScript -Encoding UTF8
-
-    $psExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    $dbg = "`"$psExe`" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$hookScript`""
-    $key = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\fdm.exe'
-    New-Item -Path $key -Force | Out-Null
-    Set-ItemProperty -Path $key -Name 'Debugger' -Value $dbg
-}
-
-function Disable-FdmSilentInstallHook {
-    $key = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\fdm.exe'
-    if (Test-Path -LiteralPath $key) {
-        Remove-Item -LiteralPath $key -Recurse -Force -ErrorAction SilentlyContinue
-    }
-}
-
 # ================================================
 # Progress Bar
 # Renders a two-line progress indicator directly to
@@ -398,11 +369,11 @@ function Get-AppInstalledInfo {
                 $v = Get-FileVersionSafe -Path $exe
             }
             return [PSCustomObject]@{
-                Installed       = $true
-                VersionString   = $v
-                Source          = 'registry'
+                Installed     = $true
+                VersionString = $v
+                Source        = 'registry'
                 InstallLocation = $loc
-                DisplayName     = $reg.DisplayName
+                DisplayName   = $reg.DisplayName
             }
         }
     }
@@ -441,14 +412,14 @@ $apps = @(
 
     # ---- Browsers ----
     [ordered]@{
-        Name                = 'Brave Browser'
-        Url                 = 'https://github.com/brave/brave-browser/releases/latest/download/BraveBrowserStandaloneSilentSetup.exe'
-        FileName            = 'BraveSetup.exe'
-        Type                = 'installer'
-        SilentArgs          = ''
-        NoInstDir           = $true
-        AutoUpdateUrl       = $true
-        Detect              = @{ MatchNames = @('Brave') }
+        Name          = 'Brave Browser'
+        Url           = 'https://github.com/brave/brave-browser/releases/latest/download/BraveBrowserStandaloneSilentSetup.exe'
+        FileName      = 'BraveSetup.exe'
+        Type          = 'installer'
+        SilentArgs    = ''
+        NoInstDir     = $true
+        AutoUpdateUrl = $true
+        Detect        = @{ MatchNames = @('Brave') }
         LatestVersionScript = {
             $tag = [string](Get-GitHubRelease 'brave/brave-browser').tag_name
             if ($tag -match '([0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?)') { return $Matches[1] }
@@ -458,28 +429,28 @@ $apps = @(
 
     # ---- Development ----
     [ordered]@{
-        Name                = 'Visual Studio Code'
-        Url                 = 'https://update.code.visualstudio.com/latest/win32-x64/stable'
-        FileName            = 'VSCodeSetup.exe'
-        Type                = 'installer'
-        SilentArgs          = '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /MERGETASKS=!runcode /DIR="{INSTDIR}"'
-        Detect              = @{ MatchNames = @('Microsoft Visual Studio Code', 'Visual Studio Code') }
+        Name       = 'Visual Studio Code'
+        Url        = 'https://update.code.visualstudio.com/latest/win32-x64/stable'
+        FileName   = 'VSCodeSetup.exe'
+        Type       = 'installer'
+        SilentArgs = '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /MERGETASKS=!runcode /DIR="{INSTDIR}"'
+        Detect     = @{ MatchNames = @('Microsoft Visual Studio Code', 'Visual Studio Code') }
         LatestVersionScript = {
             $j = Invoke-RestMethod -Uri 'https://update.code.visualstudio.com/api/update/win32-x64/stable/latest' -ErrorAction Stop
             return $j.productVersion
         }
     },
     [ordered]@{
-        Name                = 'Git'
-        Url                 = ''
-        DynamicUrlScript    = {
+        Name             = 'Git'
+        Url              = ''
+        DynamicUrlScript = {
             $j = Get-GitHubRelease 'git-for-windows/git'
             ($j.assets | Where-Object { $_.name -match '64-bit\.exe$' } | Select-Object -First 1).browser_download_url
         }
-        FileName            = 'GitSetup.exe'
-        Type                = 'installer'
-        SilentArgs          = '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /NOCANCEL /SP- /DIR="{INSTDIR}"'
-        Detect              = @{ MatchNames = @('Git'); ExeRelativePath = 'bin\git.exe' }
+        FileName   = 'GitSetup.exe'
+        Type       = 'installer'
+        SilentArgs = '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /NOCANCEL /SP- /DIR="{INSTDIR}"'
+        Detect     = @{ MatchNames = @('Git'); ExeRelativePath = 'bin\git.exe' }
         LatestVersionScript = {
             $tag = [string](Get-GitHubRelease 'git-for-windows/git').tag_name
             if ($tag -match '([0-9]+\.[0-9]+\.[0-9]+)') { return $Matches[1] }
@@ -489,16 +460,16 @@ $apps = @(
 
     # ---- Editors & Viewers ----
     [ordered]@{
-        Name                = 'Notepad++'
-        Url                 = ''
-        DynamicUrlScript    = {
+        Name             = 'Notepad++'
+        Url              = ''
+        DynamicUrlScript = {
             $j = Get-GitHubRelease 'notepad-plus-plus/notepad-plus-plus'
             ($j.assets | Where-Object { $_.name -match 'x64\.exe$' -and $_.name -notmatch 'arm' } | Select-Object -First 1).browser_download_url
         }
-        FileName            = 'NotepadPlusPlusSetup.exe'
-        Type                = 'installer'
-        SilentArgs          = '/S /D={INSTDIR}'
-        Detect              = @{ MatchNames = @('Notepad++'); ExeRelativePath = 'notepad++.exe' }
+        FileName   = 'NotepadPlusPlusSetup.exe'
+        Type       = 'installer'
+        SilentArgs = '/S /D={INSTDIR}'
+        Detect     = @{ MatchNames = @('Notepad++'); ExeRelativePath = 'notepad++.exe' }
         LatestVersionScript = {
             $tag = [string](Get-GitHubRelease 'notepad-plus-plus/notepad-plus-plus').tag_name
             if ($tag -match '([0-9]+\.[0-9]+(\.[0-9]+)?)') { return $Matches[1] }
@@ -514,27 +485,27 @@ $apps = @(
             $latest = ($r.Links | Where-Object href -match '\.exe$').href | Sort-Object | Select-Object -Last 1
             return $BaseUrl + $latest
         }
-        FileName         = 'OkularSetup.exe'
-        Type             = 'installer'
-        SilentArgs       = '/S /D={INSTDIR}'
-        NoInstDir        = $false
-        Detect           = @{ MatchNames = @('Okular'); ExeRelativePath = 'bin\okular.exe' }
+        FileName   = 'OkularSetup.exe'
+        Type       = 'installer'
+        SilentArgs = '/S /D={INSTDIR}'
+        NoInstDir  = $false
+        Detect     = @{ MatchNames = @('Okular'); ExeRelativePath = 'bin\okular.exe' }
     },
 
     # ---- Media ----
     [ordered]@{
-        Name                = 'VLC Media Player'
-        Url                 = ''
-        DynamicUrlScript    = {
+        Name             = 'VLC Media Player'
+        Url              = ''
+        DynamicUrlScript = {
             $p = Invoke-WebRequest -Uri 'https://www.videolan.org/vlc/download-windows.html' -UseBasicParsing
             $link = ($p.Links | Where-Object href -match 'win64\.exe$').href | Select-Object -First 1
             if ($link -match '^//') { $link = "https:$link" }
             return $link
         }
-        FileName            = 'VLCSetup.exe'
-        Type                = 'installer'
-        SilentArgs          = '/S /D={INSTDIR}'
-        Detect              = @{ MatchNames = @('VLC media player', 'VLC'); ExeRelativePath = 'vlc.exe' }
+        FileName   = 'VLCSetup.exe'
+        Type       = 'installer'
+        SilentArgs = '/S /D={INSTDIR}'
+        Detect     = @{ MatchNames = @('VLC media player', 'VLC'); ExeRelativePath = 'vlc.exe' }
         LatestVersionScript = {
             $p = Invoke-WebRequest -Uri 'https://www.videolan.org/vlc/' -UseBasicParsing
             $m = [regex]::Match($p.Content, 'Version\s+([0-9]+\.[0-9]+\.[0-9]+)')
@@ -548,16 +519,16 @@ $apps = @(
 
     # ---- Utilities ----
     [ordered]@{
-        Name                = '7-Zip'
-        Url                 = ''
-        DynamicUrlScript    = {
+        Name             = '7-Zip'
+        Url              = ''
+        DynamicUrlScript = {
             $j = Get-GitHubRelease 'ip7z/7zip'
             ($j.assets | Where-Object { $_.name -match 'x64\.exe$' } | Select-Object -First 1).browser_download_url
         }
-        FileName            = '7zipSetup.exe'
-        Type                = 'installer'
-        SilentArgs          = '/S /D={INSTDIR}'
-        Detect              = @{ MatchNames = @('7-Zip'); ExeRelativePath = '7zFM.exe' }
+        FileName   = '7zipSetup.exe'
+        Type       = 'installer'
+        SilentArgs = '/S /D={INSTDIR}'
+        Detect     = @{ MatchNames = @('7-Zip'); ExeRelativePath = '7zFM.exe' }
         LatestVersionScript = {
             $tag = [string](Get-GitHubRelease 'ip7z/7zip').tag_name
             if ($tag -match '([0-9]+\.[0-9]+)') { return $Matches[1] }
@@ -565,16 +536,16 @@ $apps = @(
         }
     },
     [ordered]@{
-        Name                = 'Bulk Crap Uninstaller'
-        Url                 = ''
-        DynamicUrlScript    = {
+        Name             = 'Bulk Crap Uninstaller'
+        Url              = ''
+        DynamicUrlScript = {
             $j = Get-GitHubRelease 'Klocman/Bulk-Crap-Uninstaller'
             ($j.assets | Where-Object { $_.name -match '_setup\.exe$' } | Select-Object -Last 1).browser_download_url
         }
-        FileName            = 'BCUninstallerSetup.exe'
-        Type                = 'installer'
-        SilentArgs          = '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR="{INSTDIR}"'
-        Detect              = @{ MatchNames = @('Bulk Crap Uninstaller', 'BCUninstaller'); ExeRelativePath = 'BCUninstaller.exe' }
+        FileName   = 'BCUninstallerSetup.exe'
+        Type       = 'installer'
+        SilentArgs = '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR="{INSTDIR}"'
+        Detect     = @{ MatchNames = @('Bulk Crap Uninstaller', 'BCUninstaller'); ExeRelativePath = 'BCUninstaller.exe' }
         LatestVersionScript = {
             $tag = [string](Get-GitHubRelease 'Klocman/Bulk-Crap-Uninstaller').tag_name
             if ($tag -match '([0-9]+\.[0-9]+(\.[0-9]+)?)') { return $Matches[1] }
@@ -582,12 +553,12 @@ $apps = @(
         }
     },
     [ordered]@{
-        Name                = 'Free Download Manager'
-        Url                 = 'https://files2.freedownloadmanager.org/6/latest/fdm_x64_setup.exe'
-        FileName            = 'FDMSetup.exe'
-        Type                = 'installer'
-        SilentArgs          = '/SP- /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR="{INSTDIR}"'
-        Detect              = @{ MatchNames = @('Free Download Manager') }
+        Name       = 'Free Download Manager'
+        Url        = 'https://files2.freedownloadmanager.org/6/latest/fdm_x64_setup.exe'
+        FileName   = 'FDMSetup.exe'
+        Type       = 'installer'
+        SilentArgs = '/SP- /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR="{INSTDIR}"'
+        Detect     = @{ MatchNames = @('Free Download Manager') }
         LatestVersionScript = {
             $p = Invoke-WebRequest -Uri 'https://freedownloadmanager.org/download.htm' -UseBasicParsing
             $m = [regex]::Match($p.Content, 'FDM\s+([0-9]+\.[0-9]+\.[0-9]+)')
@@ -600,32 +571,32 @@ $apps = @(
 
     # ---- Communication ----
     [ordered]@{
-        Name                  = 'Telegram'
-        Url                   = 'https://telegram.org/dl/desktop/win64_portable'
-        FileName              = 'Telegram.zip'
-        Type                  = 'zip'
-        Detect                = @{ ExeRelativePath = 'Telegram.exe' }
+        Name       = 'Telegram'
+        Url        = 'https://telegram.org/dl/desktop/win64_portable'
+        FileName   = 'Telegram.zip'
+        Type       = 'zip'
+        Detect     = @{ ExeRelativePath = 'Telegram.exe' }
         SkipUpdateIfInstalled = $true
     },
     [ordered]@{
-        Name                  = 'Discord'
-        Url                   = 'https://discord.com/api/download?platform=win'
-        FileName              = 'DiscordSetup.exe'
-        Type                  = 'installer'
-        SilentArgs            = '-s'
-        NoInstDir             = $true
-        Detect                = @{ MatchNames = @('Discord') }
+        Name       = 'Discord'
+        Url        = 'https://discord.com/api/download?platform=win'
+        FileName   = 'DiscordSetup.exe'
+        Type       = 'installer'
+        SilentArgs = '-s'
+        NoInstDir  = $true
+        Detect     = @{ MatchNames = @('Discord') }
         SkipUpdateIfInstalled = $true
     },
 
     # ---- Gaming ----
     [ordered]@{
-        Name                  = 'Steam'
-        Url                   = 'https://cdn.akamai.steamstatic.com/client/installer/SteamSetup.exe'
-        FileName              = 'SteamSetup.exe'
-        Type                  = 'installer'
-        SilentArgs            = '/S /D={INSTDIR}'
-        Detect                = @{ MatchNames = @('Steam') }
+        Name       = 'Steam'
+        Url        = 'https://cdn.akamai.steamstatic.com/client/installer/SteamSetup.exe'
+        FileName   = 'SteamSetup.exe'
+        Type       = 'installer'
+        SilentArgs = '/S /D={INSTDIR}'
+        Detect     = @{ MatchNames = @('Steam') }
         SkipUpdateIfInstalled = $true
     }
 )
@@ -779,7 +750,7 @@ Write-Info "`nChecking installed apps..."
 $script:_preflightCache = @{}
 
 $useJobs = ($PSVersionTable.PSVersion.Major -ge 5)
-$jobList = [System.Collections.Generic.List[object]]::new()
+$jobList  = [System.Collections.Generic.List[object]]::new()
 
 foreach ($app in $apps) {
     $installedInfo = Get-AppInstalledInfo -App $app -AppsRoot $AppsRoot
@@ -817,18 +788,18 @@ foreach ($entry in $jobList) {
 }
 
 # Render the interactive application selection menu.
-$winWidth = $Host.UI.RawUI.WindowSize.Width
+$winWidth  = $Host.UI.RawUI.WindowSize.Width
 $colStatus = 14   # width of status column
-$colName = 26   # width of app name column
+$colName   = 26   # width of app name column
 
 Write-Host ''
 Write-Host ('  ' + 'NUM'.PadRight(5) + 'STATUS'.PadRight($colStatus) + 'APP'.PadRight($colName) + 'VERSION') -ForegroundColor DarkGray
 Write-Host ('  ' + ('-' * ($winWidth - 6))) -ForegroundColor DarkGray
 
 for ($i = 0; $i -lt $apps.Count; $i++) {
-    $app = $apps[$i]
-    $pf = $script:_preflightCache[$app.Name]
-    $inst = $pf.Installed
+    $app    = $apps[$i]
+    $pf     = $script:_preflightCache[$app.Name]
+    $inst   = $pf.Installed
     $latest = $pf.Latest
 
     $num = "[$($i + 1)]".PadRight(5)
@@ -837,34 +808,34 @@ for ($i = 0; $i -lt $apps.Count; $i++) {
     if (-not $inst.Installed) {
         $statusLabel = 'NOT INSTALLED'
         $statusColor = 'DarkGray'
-        $verLabel = if ($latest) { "latest: $latest" } else { '' }
-        $verColor = 'DarkGray'
+        $verLabel    = if ($latest) { "latest: $latest" } else { '' }
+        $verColor    = 'DarkGray'
     }
     else {
-        $instVer = ConvertTo-VersionSafe -VersionString $inst.VersionString
+        $instVer   = ConvertTo-VersionSafe -VersionString $inst.VersionString
         $latestVer = ConvertTo-VersionSafe -VersionString $latest
 
         if ($latestVer -and $instVer -and ($instVer -lt $latestVer)) {
             $statusLabel = 'UPDATE AVAIL'
             $statusColor = 'Yellow'
-            $verLabel = "$($inst.VersionString) -> $latest"
-            $verColor = 'Yellow'
+            $verLabel    = "$($inst.VersionString) -> $latest"
+            $verColor    = 'Yellow'
         }
         elseif ($app.SkipUpdateIfInstalled) {
             $statusLabel = 'INSTALLED'
             $statusColor = 'Green'
-            $verLabel = if ($inst.VersionString) { $inst.VersionString } else { '' }
-            $verColor = 'DarkGray'
+            $verLabel    = if ($inst.VersionString) { $inst.VersionString } else { '' }
+            $verColor    = 'DarkGray'
         }
         else {
             $statusLabel = 'UP TO DATE'
             $statusColor = 'Green'
-            $verLabel = if ($inst.VersionString) { $inst.VersionString } else { '' }
-            $verColor = 'DarkGray'
+            $verLabel    = if ($inst.VersionString) { $inst.VersionString } else { '' }
+            $verColor    = 'DarkGray'
         }
     }
 
-    $nameCol = $app.Name.PadRight($colName)
+    $nameCol   = $app.Name.PadRight($colName)
     $statusCol = $statusLabel.PadRight($colStatus)
 
     Write-Host "  $num" -NoNewline -ForegroundColor DarkGray
@@ -887,20 +858,20 @@ do {
         }
         'U' {
             $selected = @($apps | Where-Object {
-                    $pf = $script:_preflightCache[$_.Name]
-                    $iv = ConvertTo-VersionSafe -VersionString $pf.Installed.VersionString
-                    $lv = ConvertTo-VersionSafe -VersionString $pf.Latest
-                    (-not $pf.Installed.Installed) -or ($iv -and $lv -and $iv -lt $lv)
-                })
+                $pf  = $script:_preflightCache[$_.Name]
+                $iv  = ConvertTo-VersionSafe -VersionString $pf.Installed.VersionString
+                $lv  = ConvertTo-VersionSafe -VersionString $pf.Latest
+                (-not $pf.Installed.Installed) -or ($iv -and $lv -and $iv -lt $lv)
+            })
             if (-not $selected) { Write-Warn '  No updates or new installs found.' }
         }
         default {
             $indices = $choice -split ',' |
-            ForEach-Object {
-                $n = 0
-                if ([int]::TryParse($_.Trim(), [ref]$n)) { $n }
-            } |
-            Where-Object { $_ -ge 1 -and $_ -le $apps.Count }
+                ForEach-Object {
+                    $n = 0
+                    if ([int]::TryParse($_.Trim(), [ref]$n)) { $n }
+                } |
+                Where-Object { $_ -ge 1 -and $_ -le $apps.Count }
 
             if ($indices) {
                 $selected = @($indices | ForEach-Object { $apps[$_ - 1] })
@@ -1024,10 +995,6 @@ foreach ($app in $selected) {
                     $app.SilentArgs -replace '\{INSTDIR\}', $appDir
                 }
 
-                $fdmHook = ($app.Name -eq 'Free Download Manager')
-                if ($fdmHook) {
-                    Enable-FdmSilentInstallHook
-                }
                 try {
                     # Launch the installer process. The script is already running with elevated privileges.
                     $procArgs = @{ FilePath = $tmpFile; PassThru = $true; ErrorAction = 'Stop' }
@@ -1067,11 +1034,7 @@ foreach ($app in $selected) {
                         Write-Err "  Installer exit code: $($proc.ExitCode)"
                     }
                 }
-                finally {
-                    if ($fdmHook) {
-                        Disable-FdmSilentInstallHook
-                    }
-                }
+                finally { }
             }
 
             'zip' {
@@ -1132,12 +1095,12 @@ $totalTimer.Stop()
 # ================================================
 $totalTimer.Stop()
 
-$ok = @($results | Where-Object { $_.Status -eq 'SUCCESS' })
+$ok      = @($results | Where-Object { $_.Status -eq 'SUCCESS' })
 $skipped = @($results | Where-Object { $_.Status -like 'SKIPPED*' })
-$failed = @($results | Where-Object { $_.Status -like 'FAILED*' })
+$failed  = @($results | Where-Object { $_.Status -like 'FAILED*' })
 
 $colStat = 22
-$colApp = 26
+$colApp  = 26
 
 Write-Host ''
 Write-Host ('=' * 60) -ForegroundColor DarkGray
@@ -1147,9 +1110,9 @@ Write-Host ("  " + 'STATUS'.PadRight($colStat) + 'APP'.PadRight($colApp) + 'LOCA
 Write-Host ("  " + ('-' * 58)) -ForegroundColor DarkGray
 
 foreach ($r in $results) {
-    $color = if ($r.Status -eq 'SUCCESS') { 'Green' }
-    elseif ($r.Status -like 'FAILED*') { 'Red' }
-    else { 'Yellow' }
+    $color = if     ($r.Status -eq 'SUCCESS')    { 'Green'  }
+             elseif ($r.Status -like 'FAILED*')  { 'Red'    }
+             else                                { 'Yellow' }
 
     $loc = if ($r.Location) { $r.Location } else { '-' }
 
@@ -1162,9 +1125,9 @@ foreach ($r in $results) {
 Write-Host ("  " + ('-' * 58)) -ForegroundColor DarkGray
 
 $parts = @()
-if ($ok.Count) { $parts += "$($ok.Count) installed/updated" }
+if ($ok.Count)      { $parts += "$($ok.Count) installed/updated" }
 if ($skipped.Count) { $parts += "$($skipped.Count) skipped" }
-if ($failed.Count) { $parts += "$($failed.Count) failed" }
+if ($failed.Count)  { $parts += "$($failed.Count) failed" }
 Write-Host ("  " + ($parts -join '   .   ')) -ForegroundColor DarkGray
 
 Write-Host ''
