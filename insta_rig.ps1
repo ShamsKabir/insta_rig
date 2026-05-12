@@ -778,15 +778,7 @@ $script:_preflightCache = @{}
 $useJobs = ($PSVersionTable.PSVersion.Major -ge 5)
 $jobList  = [System.Collections.Generic.List[object]]::new()
 
-# Show a determinate bar while scanning the registry for each app.
-$_scanTotal = $apps.Count
-$_scanDone  = 0
-Show-ProgressBar -Status 'Scanning installed apps...' -Percent 0
-
 foreach ($app in $apps) {
-    $_scanDone++
-    $pct = [int](($_scanDone / $_scanTotal) * 100)
-    Show-ProgressBar -Status "Scanning  [$($app.Name)]" -Percent $pct
     $installedInfo = Get-AppInstalledInfo -App $app -AppsRoot $AppsRoot
 
     if ($useJobs -and $app.LatestVersionScript) {
@@ -812,47 +804,19 @@ foreach ($app in $apps) {
     }
 }
 
-Clear-ProgressBar
-
 # Collect results from parallel background jobs with a per-job timeout of 15 seconds.
-# Drive a determinate progress bar while waiting so the check phase feels responsive.
-$_total    = $jobList.Count
-$_done     = 0
-$_appsDone = [System.Collections.Generic.List[string]]::new()
-
-if ($_total -gt 0) {
-    Show-ProgressBar -Status 'Checking versions...' -Percent 0
-}
-
 foreach ($entry in $jobList) {
     $latest = $null
-
-    # Poll the job in short intervals so the progress bar stays live.
-    $deadline = [System.Diagnostics.Stopwatch]::StartNew()
-    while (-not $entry.Job.HasMoreData -and -not ($entry.Job.State -in 'Completed','Failed','Stopped') -and $deadline.Elapsed.TotalSeconds -lt 15) {
-        $pct = if ($_total -gt 0) { [int](($_done / $_total) * 100) } else { 100 }
-        Show-ProgressBar -Status "Checking versions  [$($entry.App)]" -Percent $pct
-        Start-Sleep -Milliseconds 80
-    }
-
     try {
         $latest = $entry.Job | Wait-Job -Timeout 15 | Receive-Job
         $entry.Job | Remove-Job -Force -ErrorAction SilentlyContinue
     }
     catch { }
-
-    $_done++
-    $_appsDone.Add($entry.App)
-    $pct = if ($_total -gt 0) { [int](($_done / $_total) * 100) } else { 100 }
-    Show-ProgressBar -Status "Checking versions  [$($entry.App) done]" -Percent $pct
-
     $script:_preflightCache[$entry.App] = [PSCustomObject]@{
         Installed = $entry.Installed
         Latest    = $latest
     }
 }
-
-if ($_total -gt 0) { Clear-ProgressBar }
 
 # Render the interactive application selection menu.
 $winWidth  = $Host.UI.RawUI.WindowSize.Width
