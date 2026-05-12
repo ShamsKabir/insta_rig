@@ -757,11 +757,16 @@ foreach ($app in $apps) {
 
     if ($useJobs -and $app.LatestVersionScript) {
         $sb = $app.LatestVersionScript
+        # Capture the Get-GitHubRelease function body so it is available inside the isolated job runspace.
+        $ghFuncBody = (Get-Item Function:\Get-GitHubRelease).ScriptBlock.ToString()
         $job = Start-Job -ScriptBlock {
-            param($block)
-            $ProgressPreference = 'SilentlyContinue'  # Suppress progress output inside background jobs
+            param($block, $ghFunc)
+            $ProgressPreference = 'SilentlyContinue'
+            # Re-define the helper and its in-process cache inside the job.
+            $script:_ghCache = @{}
+            Invoke-Expression "function Get-GitHubRelease { $ghFunc }"
             try { & ([scriptblock]::Create($block)) } catch { $null }
-        } -ArgumentList $sb.ToString()
+        } -ArgumentList $sb.ToString(), $ghFuncBody
         $jobList.Add([PSCustomObject]@{ App = $app.Name; Job = $job; Installed = $installedInfo })
     }
     else {
@@ -1026,6 +1031,12 @@ foreach ($app in $selected) {
                         elseif ($post.InstallLocation) {
                             $finalLocation = $post.InstallLocation
                         }
+                        elseif ($app.Detect -and $app.Detect.MatchNames) {
+                            # For NoInstDir apps (e.g. Discord) the installer picks its own path.
+                            # Re-query the registry after install to surface the actual location.
+                            $reg = Get-InstalledProgramInfo -MatchNames $app.Detect.MatchNames
+                            $finalLocation = if ($reg) { Get-InstallLocationFromUninstallEntry -RegEntry $reg } else { '' }
+                        }
                         else {
                             $finalLocation = ''
                         }
@@ -1088,12 +1099,97 @@ foreach ($app in $selected) {
 $totalTimer.Stop()
 
 # ================================================
+# Startup Disable
+# Removes startup entries for apps that are known
+# to register themselves at Windows boot. Covers:
+#   - HKCU Run key (current user auto-start)
+#   - HKLM Run key (all users auto-start)
+#   - Task Manager startup approved list (HKCU\...\StartupApproved\Run)
+# Apps targeted: Discord, Steam, Free Download Manager.
+# Extend $startupAppPatterns to cover additional apps.
+# ================================================
+Write-Host ''
+Write-Host '  Disabling startup entries...' -ForegroundColor Cyan
+
+$startupAppPatterns = @(
+    'Discord',
+    'Steam',
+    'Free Download Manager',
+    'FDM'
+)
+
+$runPaths = @(
+    'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run',
+    'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run',
+    'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run'
+)
+
+$approvedPaths = @(
+    'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run',
+    'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run32'
+)
+
+$disabledCount = 0
+
+foreach ($runPath in $runPaths) {
+    if (-not (Test-Path $runPath)) { continue }
+    $props = Get-ItemProperty -Path $runPath -ErrorAction SilentlyContinue
+    if (-not $props) { continue }
+    foreach ($name in ($props.PSObject.Properties | Where-Object { $_.MemberType -eq 'NoteProperty' -and $_.Name -notlike 'PS*' }).Name) {
+        foreach ($pattern in $startupAppPatterns) {
+            if ($name -like "*$pattern*") {
+                try {
+                    Remove-ItemProperty -Path $runPath -Name $name -ErrorAction Stop
+                    Write-Host "    Removed Run key: '$name' from $runPath" -ForegroundColor DarkGray
+                    $disabledCount++
+                }
+                catch {
+                    Write-Host "    Could not remove '$name': $($_.Exception.Message)" -ForegroundColor Yellow
+                }
+                break
+            }
+        }
+    }
+}
+
+# Stamp the StartupApproved bytes to the disabled state (03 00 00 00 00 00 00 00 00 00 00 00)
+# so Task Manager shows the entry as Disabled even if the Run key is re-added by the app.
+$disabledBytes = [byte[]](0x03,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00)
+
+foreach ($approvedPath in $approvedPaths) {
+    if (-not (Test-Path $approvedPath)) { continue }
+    $props = Get-ItemProperty -Path $approvedPath -ErrorAction SilentlyContinue
+    if (-not $props) { continue }
+    foreach ($name in ($props.PSObject.Properties | Where-Object { $_.MemberType -eq 'NoteProperty' -and $_.Name -notlike 'PS*' }).Name) {
+        foreach ($pattern in $startupAppPatterns) {
+            if ($name -like "*$pattern*") {
+                try {
+                    Set-ItemProperty -Path $approvedPath -Name $name -Value $disabledBytes -Type Binary -ErrorAction Stop
+                    Write-Host "    Disabled StartupApproved: '$name'" -ForegroundColor DarkGray
+                    $disabledCount++
+                }
+                catch {
+                    Write-Host "    Could not disable '$name': $($_.Exception.Message)" -ForegroundColor Yellow
+                }
+                break
+            }
+        }
+    }
+}
+
+if ($disabledCount -eq 0) {
+    Write-Host '    No matching startup entries found (they may not be registered yet).' -ForegroundColor DarkGray
+}
+else {
+    Write-Ok "    $disabledCount startup entry/entries disabled."
+}
+
+# ================================================
 # Installation Summary
 # Displays a formatted table of results grouped by
 # outcome (SUCCESS / SKIPPED / FAILED), followed by
 # aggregate counts and total elapsed time.
 # ================================================
-$totalTimer.Stop()
 
 $ok      = @($results | Where-Object { $_.Status -eq 'SUCCESS' })
 $skipped = @($results | Where-Object { $_.Status -like 'SKIPPED*' })
