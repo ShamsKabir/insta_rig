@@ -1,14 +1,15 @@
 # ===================================================
 # insta_rig.ps1
-# Automated application installer and updater for Windows.
-# Downloads, installs, and updates a predefined set of
-# applications with silent/unattended installation support.
-# Requires elevation to Administrator privileges.
+# Automated application installer for Windows.
+# Downloads and silently installs a predefined set of
+# applications. Unattended installation is supported
+# for all included packages.
+# Requires Administrator privileges to run.
 # ===================================================
 param(
-    # Passed automatically when the script re-launches itself elevated.
-    # Controls whether a "Press Enter to close" pause is shown at the end,
-    # since an auto-elevated window would otherwise close immediately.
+    # Set automatically when the script re-launches itself in an elevated session.
+    # When present, a "Press Enter to close" prompt is displayed at the end,
+    # preventing the auto-elevated console window from closing immediately.
     [switch]$AutoElevated
 )
 
@@ -18,23 +19,24 @@ $ErrorActionPreference = 'Stop'
 
 # ================================================
 # Privilege Elevation
-# Re-launches the script under an elevated Administrator
-# session if the current process is not already elevated.
-# Prefers Windows Terminal (wt.exe) when available.
+# Re-launches the script in an elevated Administrator
+# session if the current process lacks the required
+# privileges. Windows Terminal (wt.exe) is preferred
+# when available; otherwise the shell is launched directly.
 # ================================================
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
         [Security.Principal.WindowsBuiltInRole]::Administrator)) {
     $shell = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh' } else { 'powershell' }
     $wt = Get-Command wt -ErrorAction SilentlyContinue
-    # Pass -AutoElevated so the relaunched elevated session knows to pause at the end.
+    # Include -AutoElevated so the re-launched elevated session displays the closing prompt.
     $relaunchArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -AutoElevated"
     if ($wt) {
-        # Open a brand-new, separate Windows Terminal window using '-w new'.
-        # The elevated session is fully independent — no shared window lifetime.
+        # Launch a new, independent Windows Terminal window using '-w new'.
+        # The elevated session has no shared lifetime with the calling window.
         Start-Process wt -Verb RunAs -ArgumentList "-w new $shell $relaunchArgs"
     }
     else {
-        # No Windows Terminal available; launch the shell directly in a new elevated window.
+        # Windows Terminal is unavailable; launch the shell directly in a new elevated window.
         Start-Process $shell -Verb RunAs -ArgumentList $relaunchArgs
     }
     Write-Host 'Elevated session launched.' -ForegroundColor DarkGray
@@ -46,12 +48,12 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 # ================================================
 # Console Output Helpers
-# Thin wrappers around Write-Host that apply a
-# consistent colour scheme to status messages:
+# Convenience wrappers around Write-Host that apply a
+# consistent colour scheme to all status messages:
 #   Info  = Cyan     (informational)
 #   Ok    = Green    (success)
 #   Warn  = Yellow   (non-fatal warning)
-#   Note  = DarkGray (verbose/supplementary)
+#   Note  = DarkGray (verbose / supplementary)
 #   Err   = Red      (error)
 # ================================================
 function Write-Info { param([string]$Message) Write-Host $Message -ForegroundColor Cyan }
@@ -64,9 +66,9 @@ function Write-Err { param([string]$Message) Write-Host $Message -ForegroundColo
 # Progress Bar
 # Renders a two-line progress indicator directly to
 # the console buffer. Supports both determinate mode
-# (0–100 %) and indeterminate mode (Percent = -1).
-# Row position is stored in $script:_pbRow so that
-# subsequent redraws overwrite the same lines.
+# (0–100%) and indeterminate mode (Percent = -1).
+# The row position is stored in $script:_pbRow so
+# that subsequent redraws overwrite the same lines.
 # ================================================
 $script:_pbRow = -1
 $script:_animTimer = $null
@@ -99,7 +101,7 @@ function Show-ProgressBar {
         [Math]::Min($barInner, [int](($barInner * $Percent) / 100))
     }
     $empty = $barInner - $filled
-    $bar = ([char]0x2588 -as [string]) * $filled + ([char]0x2591 -as [string]) * $empty
+    $bar = ([char]0x2584 -as [string]) * $filled + ([char]0x20 -as [string]) * $empty
 
     if ($script:_pbRow -lt 0) {
         [Console]::CursorVisible = $false
@@ -134,11 +136,12 @@ function Clear-ProgressBar {
     [Console]::CursorVisible = $true
 }
 
-# Animated scanner bar for install phases (driven by a timer-based tick loop on the main thread).
+# Animated scanner bar displayed during installation phases.
+# Driven by a timer-based tick loop on the main thread.
 function Start-AnimatedBar {
     param([string]$Status)
 
-    # Reserve two console lines so the row index remains stable across redraws.
+    # Reserve two console lines to keep the row index stable across redraws.
     if ($script:_pbRow -lt 0) {
         [Console]::CursorVisible = $false
         [Console]::WriteLine()
@@ -151,7 +154,7 @@ function Start-AnimatedBar {
     $barInner = [Math]::Max(10, $winWidth - 3)
     $scanLen = [Math]::Max(6, [int]($barInner * 0.18))
 
-    # Render the status text line above the animated bar.
+    # Render the status text on the line above the animated bar.
     $available = $winWidth - 10
     $line1 = if ($Status.Length -gt $available) { $Status.Substring(0, $available) } else { $Status.PadRight($available) }
     $line1 += ' ...  '.PadLeft(8)
@@ -161,7 +164,7 @@ function Start-AnimatedBar {
     [Console]::Write($line1)
     [Console]::ResetColor()
 
-    # Persist animation state in script scope so Stop-AnimatedBar can clean up correctly.
+    # Store animation state in script scope so that Stop-AnimatedBar can perform cleanup correctly.
     $script:_animPos = 0
     $script:_animDir = 1
     $script:_animStatus = $Status
@@ -182,7 +185,7 @@ function Invoke-AnimationTick {
     $scanLen = $script:_animScanLen
     $pos = $script:_animPos
 
-    # Fast string-multiply approach — no char array allocation or -join overhead
+    # String-multiply approach — avoids char array allocation and -join overhead.
     $clampedPos = [Math]::Max(0, $pos)
     $clampedEnd = [Math]::Min($inner, $pos + $scanLen)
     $filledCount = [Math]::Max(0, $clampedEnd - $clampedPos)
@@ -195,7 +198,7 @@ function Invoke-AnimationTick {
     [Console]::Write($bar)
     [Console]::ResetColor()
 
-    # Advance the scanner position; wrap back to the start when the bar end is reached.
+    # Advance the scanner position and wrap back to the start when the bar end is reached.
     $script:_animPos += 1
     if ($script:_animPos -ge $inner) { $script:_animPos = - $scanLen }
 }
@@ -249,8 +252,9 @@ function Stop-Spinner {
 
 # ================================================
 # ASCII Banner
-# Renders the application title in two-tone ASCII art
-# using Blue and DarkYellow to visually split the text.
+# Renders the application title in two-tone ASCII art.
+# The text is split at a fixed column and coloured in
+# Blue and DarkYellow to create a visual distinction.
 # ================================================
 Write-Host ''
 $lines = @(
@@ -289,8 +293,8 @@ $script:UninstallRegPaths = @(
     'HKCU:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
 )
 
-# Lazily-populated cache of all installed programs read from registry.
-# Populated on first call; subsequent calls reuse the same list.
+# Lazily populated cache of all installed programs read from the registry.
+# Initialised on first call; all subsequent calls reuse the cached list.
 $script:_regCache = $null
 
 function Get-AllInstalledPrograms {
@@ -310,7 +314,7 @@ function Get-InstalledProgramInfo {
     $items = Get-AllInstalledPrograms
 
     foreach ($name in $MatchNames) {
-        # Iterate directly — avoids a second pipeline pass per name
+        # Iterate directly to avoid a second pipeline pass per name.
         foreach ($item in $items) {
             if ($item.DisplayName -like "*$name*") {
                 return [PSCustomObject]@{
@@ -331,18 +335,18 @@ function Get-InstallLocationFromUninstallEntry {
     param([pscustomobject]$RegEntry)
     if (-not $RegEntry) { return '' }
 
-    # Prefer the InstallLocation registry value when it points to an existing directory.
+    # Use the InstallLocation registry value when it points to an existing directory.
     if ($RegEntry.InstallLocation -and (Test-Path -LiteralPath $RegEntry.InstallLocation)) {
         return $RegEntry.InstallLocation
     }
 
-    # Fall back to deriving the folder from DisplayIcon or UninstallString executable paths.
+    # Fall back to deriving the installation folder from the DisplayIcon or UninstallString executable path.
     $candidates = @($RegEntry.DisplayIcon, $RegEntry.UninstallString) | Where-Object { $_ }
     foreach ($c in $candidates) {
         $s = [string]$c
         if (-not $s) { continue }
 
-        # Extract the first quoted path; fall back to the first whitespace-delimited token.
+        # Extract the first quoted path; fall back to the first whitespace-delimited token if unquoted.
         $path = $null
         $m = [regex]::Match($s, '"([^"]+)"')
         if ($m.Success) { $path = $m.Groups[1].Value } else { $path = ($s -split '\s+')[0] }
@@ -355,8 +359,9 @@ function Get-InstallLocationFromUninstallEntry {
             if ($item -and $item.PSIsContainer) { return $path }
         }
 
-        # For apps like Discord that install under a versioned subdirectory (e.g. app-1.0.9043),
-        # walk up the tree until we find a populated non-system parent folder.
+        # For applications such as Discord that install into a versioned subdirectory
+        # (e.g. app-1.0.9043), walk up the directory tree to find the nearest
+        # populated non-system parent folder.
         $parent = Split-Path -Parent $path
         while ($parent -and $parent.Length -gt 3) {
             if (Test-Path -LiteralPath $parent) {
@@ -375,7 +380,7 @@ function Test-DirectoryPopulated {
     try {
         if (-not $Path) { return $false }
         if (-not (Test-Path -LiteralPath $Path)) { return $false }
-        # Use enumerator with -First 1 to short-circuit on the first item found
+        # Use an enumerator with -First 1 to short-circuit on the first item found.
         $null -ne (Get-ChildItem -LiteralPath $Path -Force -ErrorAction SilentlyContinue |
             Select-Object -First 1)
     }
@@ -400,7 +405,7 @@ function Get-AppInstalledInfo {
         [Parameter(Mandatory = $true)][string]$AppsRoot
     )
 
-    # For ZIP-based apps, "installed" is determined by the presence of the expected executable.
+    # For ZIP-based applications, installation is confirmed by the presence of the expected executable.
     if ($App.Type -eq 'zip') {
         $appDir = Join-Path $AppsRoot $App.Name
         $exeRel = $App.Detect.ExeRelativePath
@@ -416,7 +421,7 @@ function Get-AppInstalledInfo {
         return [PSCustomObject]@{ Installed = $false; VersionString = $null; Source = 'zip'; AppDir = $appDir }
     }
 
-    # For installer-based apps, prefer a registry lookup as the most reliable detection signal.
+    # For installer-based applications, a registry lookup is the most reliable detection method.
     if ($App.Detect -and $App.Detect.MatchNames) {
         $reg = Get-InstalledProgramInfo -MatchNames $App.Detect.MatchNames
         if ($reg) {
@@ -442,7 +447,7 @@ function Get-AppInstalledInfo {
 
 # In-memory cache for GitHub Releases API responses.
 # Prevents redundant HTTP requests when multiple DynamicUrlScripts
-# query the same repository within one run.
+# query the same repository within a single run.
 $script:_ghCache = @{}
 
 function Get-GitHubRelease {
@@ -461,153 +466,153 @@ $apps = @(
 
     # ---- Browsers ----
     [ordered]@{
-        Name                = 'Brave Browser'
-        Url                 = 'https://github.com/brave/brave-browser/releases/latest/download/BraveBrowserStandaloneSilentSetup.exe'
-        FileName            = 'BraveSetup.exe'
-        Type                = 'installer'
-        SilentArgs          = ''
-        NoInstDir           = $true
-        AutoUpdateUrl       = $true
-        Detect              = @{ MatchNames = @('Brave') }
+        Name          = 'Brave Browser'
+        Url           = 'https://github.com/brave/brave-browser/releases/latest/download/BraveBrowserStandaloneSilentSetup.exe'
+        FileName      = 'BraveSetup.exe'
+        Type          = 'installer'
+        SilentArgs    = ''
+        NoInstDir     = $true
+        AutoUpdateUrl = $true
+        Detect        = @{ MatchNames = @('Brave') }
     },
 
     # ---- Development ----
     [ordered]@{
-        Name                = 'Visual Studio Code'
-        Url                 = 'https://update.code.visualstudio.com/latest/win32-x64/stable'
-        FileName            = 'VSCodeSetup.exe'
-        Type                = 'installer'
-        SilentArgs          = '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /MERGETASKS=!runcode /DIR="{INSTDIR}"'
-        Detect              = @{ MatchNames = @('Microsoft Visual Studio Code', 'Visual Studio Code') }
+        Name       = 'Visual Studio Code'
+        Url        = 'https://update.code.visualstudio.com/latest/win32-x64/stable'
+        FileName   = 'VSCodeSetup.exe'
+        Type       = 'installer'
+        SilentArgs = '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /MERGETASKS=!runcode /DIR="{INSTDIR}"'
+        Detect     = @{ MatchNames = @('Microsoft Visual Studio Code', 'Visual Studio Code') }
     },
     [ordered]@{
-        Name                = 'Git'
-        Url                 = ''
-        DynamicUrlScript    = {
+        Name             = 'Git'
+        Url              = ''
+        DynamicUrlScript = {
             $j = Get-GitHubRelease 'git-for-windows/git'
             ($j.assets | Where-Object { $_.name -match '64-bit\.exe$' } | Select-Object -First 1).browser_download_url
         }
-        FileName            = 'GitSetup.exe'
-        Type                = 'installer'
-        SilentArgs          = '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /NOCANCEL /SP- /DIR="{INSTDIR}"'
-        Detect              = @{ MatchNames = @('Git'); ExeRelativePath = 'bin\git.exe' }
+        FileName         = 'GitSetup.exe'
+        Type             = 'installer'
+        SilentArgs       = '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /NOCANCEL /SP- /DIR="{INSTDIR}"'
+        Detect           = @{ MatchNames = @('Git'); ExeRelativePath = 'bin\git.exe' }
     },
 
     # ---- Editors & Viewers ----
     [ordered]@{
-        Name                = 'Notepad++'
-        Url                 = ''
-        DynamicUrlScript    = {
+        Name             = 'Notepad++'
+        Url              = ''
+        DynamicUrlScript = {
             $j = Get-GitHubRelease 'notepad-plus-plus/notepad-plus-plus'
             ($j.assets | Where-Object { $_.name -match 'x64\.exe$' -and $_.name -notmatch 'arm' } | Select-Object -First 1).browser_download_url
         }
-        FileName            = 'NotepadPlusPlusSetup.exe'
-        Type                = 'installer'
-        SilentArgs          = '/S /D={INSTDIR}'
-        Detect              = @{ MatchNames = @('Notepad++'); ExeRelativePath = 'notepad++.exe' }
+        FileName         = 'NotepadPlusPlusSetup.exe'
+        Type             = 'installer'
+        SilentArgs       = '/S /D={INSTDIR}'
+        Detect           = @{ MatchNames = @('Notepad++'); ExeRelativePath = 'notepad++.exe' }
     },
     [ordered]@{
-        Name                = 'Okular'
-        Url                 = ''
-        DynamicUrlScript    = {
+        Name             = 'Okular'
+        Url              = ''
+        DynamicUrlScript = {
             # Resolve the latest Okular installer from the KDE CI build server.
             $baseUrl = 'https://cdn.kde.org/ci-builds/graphics/okular/master/windows/'
             $r = Invoke-WebRequest -Uri $baseUrl -UseBasicParsing -TimeoutSec 6
             $latest = ($r.Links | Where-Object href -match '\.exe$').href | Sort-Object | Select-Object -Last 1
             return $baseUrl + $latest
         }
-        FileName            = 'OkularSetup.exe'
-        Type                = 'installer'
-        SilentArgs          = '/S /D={INSTDIR}'
-        NoInstDir           = $false
-        Detect              = @{ MatchNames = @('Okular'); ExeRelativePath = 'bin\okular.exe' }
+        FileName         = 'OkularSetup.exe'
+        Type             = 'installer'
+        SilentArgs       = '/S /D={INSTDIR}'
+        NoInstDir        = $false
+        Detect           = @{ MatchNames = @('Okular'); ExeRelativePath = 'bin\okular.exe' }
     },
 
     # ---- Media ----
     [ordered]@{
-        Name                = 'VLC Media Player'
-        Url                 = ''
-        DynamicUrlScript    = {
+        Name             = 'VLC Media Player'
+        Url              = ''
+        DynamicUrlScript = {
             # Resolve the Win64 installer URL from the VideoLAN download page.
             $p = Invoke-WebRequest -Uri 'https://www.videolan.org/vlc/download-windows.html' -UseBasicParsing -TimeoutSec 6
             $link = ($p.Links | Where-Object href -match 'win64\.exe$').href | Select-Object -First 1
             if ($link -match '^//') { $link = "https:$link" }
             return $link
         }
-        FileName            = 'VLCSetup.exe'
-        Type                = 'installer'
-        SilentArgs          = '/S /D={INSTDIR}'
-        Detect              = @{ MatchNames = @('VLC media player', 'VLC'); ExeRelativePath = 'vlc.exe' }
+        FileName         = 'VLCSetup.exe'
+        Type             = 'installer'
+        SilentArgs       = '/S /D={INSTDIR}'
+        Detect           = @{ MatchNames = @('VLC media player', 'VLC'); ExeRelativePath = 'vlc.exe' }
     },
 
     # ---- Utilities ----
     [ordered]@{
-        Name                = '7-Zip'
-        Url                 = ''
-        DynamicUrlScript    = {
+        Name             = '7-Zip'
+        Url              = ''
+        DynamicUrlScript = {
             $j = Get-GitHubRelease 'ip7z/7zip'
             ($j.assets | Where-Object { $_.name -match 'x64\.exe$' } | Select-Object -First 1).browser_download_url
         }
-        FileName            = '7zipSetup.exe'
-        Type                = 'installer'
-        SilentArgs          = '/S /D={INSTDIR}'
-        Detect              = @{ MatchNames = @('7-Zip'); ExeRelativePath = '7zFM.exe' }
+        FileName         = '7zipSetup.exe'
+        Type             = 'installer'
+        SilentArgs       = '/S /D={INSTDIR}'
+        Detect           = @{ MatchNames = @('7-Zip'); ExeRelativePath = '7zFM.exe' }
     },
     [ordered]@{
-        Name                = 'Bulk Crap Uninstaller'
-        Url                 = ''
-        DynamicUrlScript    = {
+        Name             = 'Bulk Crap Uninstaller'
+        Url              = ''
+        DynamicUrlScript = {
             $j = Get-GitHubRelease 'Klocman/Bulk-Crap-Uninstaller'
             ($j.assets | Where-Object { $_.name -match '_setup\.exe$' } | Select-Object -Last 1).browser_download_url
         }
-        FileName            = 'BCUninstallerSetup.exe'
-        Type                = 'installer'
-        SilentArgs          = '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR="{INSTDIR}"'
-        Detect              = @{ MatchNames = @('Bulk Crap Uninstaller', 'BCUninstaller'); ExeRelativePath = 'BCUninstaller.exe' }
+        FileName         = 'BCUninstallerSetup.exe'
+        Type             = 'installer'
+        SilentArgs       = '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR="{INSTDIR}"'
+        Detect           = @{ MatchNames = @('Bulk Crap Uninstaller', 'BCUninstaller'); ExeRelativePath = 'BCUninstaller.exe' }
     },
     [ordered]@{
-        Name                = 'Free Download Manager'
-        Url                 = 'https://files2.freedownloadmanager.org/6/latest/fdm_x64_setup.exe'
-        FileName            = 'FDMSetup.exe'
-        Type                = 'installer'
-        SilentArgs          = '/SP- /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR="{INSTDIR}"'
-        Detect              = @{ MatchNames = @('Free Download Manager') }
+        Name       = 'Free Download Manager'
+        Url        = 'https://files2.freedownloadmanager.org/6/latest/fdm_x64_setup.exe'
+        FileName   = 'FDMSetup.exe'
+        Type       = 'installer'
+        SilentArgs = '/SP- /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR="{INSTDIR}"'
+        Detect     = @{ MatchNames = @('Free Download Manager') }
     },
 
     # ---- Communication ----
     [ordered]@{
-        Name                  = 'Telegram'
-        Url                   = 'https://github.com/telegramdesktop/tdesktop/releases/download/v6.8.2/tsetup-x64.6.8.2.exe'
-        FileName              = 'Telegram.exe'
-        Type                  = 'installer'
-        SilentArgs            = '/VERYSILENT /NOLAUNCH'
-        Detect                = @{ MatchNames = @('Telegram Desktop'); ExeRelativePath = 'Telegram.exe' }
+        Name       = 'Telegram'
+        Url        = 'https://github.com/telegramdesktop/tdesktop/releases/download/v6.8.2/tsetup-x64.6.8.2.exe'
+        FileName   = 'Telegram.exe'
+        Type       = 'installer'
+        SilentArgs = '/VERYSILENT /NOLAUNCH'
+        Detect     = @{ MatchNames = @('Telegram Desktop'); ExeRelativePath = 'Telegram.exe' }
     },
     [ordered]@{
-        Name                  = 'Discord'
-        Url                   = 'https://discord.com/api/download?platform=win'
-        FileName              = 'DiscordSetup.exe'
-        Type                  = 'installer'
-        SilentArgs            = '-s'
-        NoInstDir             = $true
-        Detect                = @{ MatchNames = @('Discord') }
+        Name       = 'Discord'
+        Url        = 'https://discord.com/api/download?platform=win'
+        FileName   = 'DiscordSetup.exe'
+        Type       = 'installer'
+        SilentArgs = '-s'
+        NoInstDir  = $true
+        Detect     = @{ MatchNames = @('Discord') }
     },
 
     # ---- Gaming ----
     [ordered]@{
-        Name                  = 'Steam'
-        Url                   = 'https://cdn.akamai.steamstatic.com/client/installer/SteamSetup.exe'
-        FileName              = 'SteamSetup.exe'
-        Type                  = 'installer'
-        SilentArgs            = '/S /D={INSTDIR}'
-        Detect                = @{ MatchNames = @('Steam') }
+        Name       = 'Steam'
+        Url        = 'https://cdn.akamai.steamstatic.com/client/installer/SteamSetup.exe'
+        FileName   = 'SteamSetup.exe'
+        Type       = 'installer'
+        SilentArgs = '/S /D={INSTDIR}'
+        Detect     = @{ MatchNames = @('Steam') }
     }
 )
 
 # ================================================
-# Recommended App Set
-# Defines the subset of apps installed when the user
-# selects the (R) Recommended option.
+# Recommended Application Set
+# Defines the subset of applications installed when
+# the user selects the (R) Recommended option.
 # ================================================
 $recommendedAppNames = @(
     'Visual Studio Code',
@@ -620,10 +625,10 @@ $recommendedAppNames = @(
 
 # ================================================
 # Download Helper
-# Downloads a file from the given URL to a local path.
+# Downloads a file from the specified URL to a local path.
 # Uses aria2c (multi-connection) as the primary downloader
-# for improved throughput; falls back to Invoke-WebRequest
-# (PS 5 / PS 7 compatible) if aria2c is unavailable.
+# for improved throughput. Falls back to Invoke-WebRequest
+# (compatible with PS 5 and PS 7) if aria2c is unavailable.
 # aria2c is retrieved automatically on first use and cached
 # in the TEMP directory for the duration of the session.
 # ================================================
@@ -638,7 +643,7 @@ function Download-File {
     $ariaZip = "$env:TEMP\aria2.zip"
     $ariaUrl = 'https://github.com/aria2/aria2/releases/download/release-1.37.0/aria2-1.37.0-win-64bit-build1.zip'
 
-    # Retrieve and extract aria2c if it is not already present in the TEMP directory.
+    # Download and extract aria2c if it is not already present in the TEMP directory.
     if (-not (Test-Path $aria2)) {
         try {
             Invoke-WebRequest -Uri $ariaUrl -OutFile $ariaZip -UseBasicParsing
@@ -650,7 +655,7 @@ function Download-File {
             $zip.Dispose()
         }
         catch {
-            # aria2c could not be retrieved; execution will fall through to the WebRequest downloader.
+            # aria2c could not be retrieved; execution will fall through to the Invoke-WebRequest downloader.
         }
         finally {
             if (Test-Path $ariaZip) { Remove-Item $ariaZip -Force -ErrorAction SilentlyContinue }
@@ -670,12 +675,12 @@ function Download-File {
             "--console-log-level=warn --summary-interval=1 " +
             "--dir=`"$dir`" --out=`"$file`" `"$Url`""
             $psi.RedirectStandardOutput = $true
-            $psi.RedirectStandardError = $true   # Redirect stderr to prevent pipe deadlock.
+            $psi.RedirectStandardError = $true   # Redirect stderr to prevent buffer-induced pipe deadlock.
             $psi.UseShellExecute = $false
             $psi.CreateNoWindow = $true
 
             $proc = [System.Diagnostics.Process]::Start($psi)
-            # Drain stderr asynchronously to prevent a pipe deadlock when the buffer fills.
+            # Drain stderr asynchronously to prevent a pipe deadlock when the output buffer fills.
             $proc.BeginErrorReadLine()
 
             while (-not $proc.HasExited) {
@@ -708,7 +713,7 @@ function Download-File {
         }
     }
 
-    # Fallback downloader: Invoke-WebRequest (compatible with both PS 5 and PS 7).
+    # Fallback downloader: Invoke-WebRequest (compatible with PS 5 and PS 7).
     try {
         Show-ProgressBar -Status "Downloading $Label (fallback)" -Percent -1
         Invoke-WebRequest -Uri $Url -OutFile $Destination -UseBasicParsing
@@ -729,7 +734,7 @@ function Download-File {
 # ================================================
 # Drive / Partition Selection
 # Enumerates available file-system drives and prompts
-# the user to choose a target drive for the Apps folder.
+# the user to select a target drive for the Apps folder.
 # ================================================
 Write-Info "Choose a drive for Apps folder (e.g. D:\Apps):"
 
@@ -758,11 +763,11 @@ if (-not (Test-Path $AppsRoot)) { New-Item -ItemType Directory -Path $AppsRoot -
 
 # ================================================
 # Application Selection
-# Checks installation status for all apps before
-# rendering the interactive menu.
+# Checks the installation status of all defined
+# applications before rendering the interactive menu.
 # ================================================
 
-# Show a spinner while checking installed apps.
+# Display a spinner while querying the installation status of each application.
 Start-Spinner -Status 'Checking installed apps...'
 
 $script:_preflightCache = @{}
@@ -794,15 +799,15 @@ for ($i = 0; $i -lt $apps.Count; $i++) {
     if (-not $inst.Installed) {
         $statusLabel = 'NOT INSTALLED'
         $statusColor = 'DarkGray'
-        $verLabel    = ''
+        $verLabel = ''
     }
     else {
         $statusLabel = 'INSTALLED'
         $statusColor = 'Green'
-        $verLabel    = if ($inst.VersionString) { $inst.VersionString } else { '' }
+        $verLabel = if ($inst.VersionString) { $inst.VersionString } else { '' }
     }
 
-    # Mark recommended apps with a star indicator.
+    # Mark recommended applications with a star indicator.
     $recMark = if ($recommendedAppNames -contains $app.Name) { '*' } else { ' ' }
     $nameCol = ($recMark + $app.Name).PadRight($colName)
     $statusCol = $statusLabel.PadRight($colStatus)
@@ -827,7 +832,7 @@ do {
             $selected = $apps
         }
         'R' {
-            # Install the predefined recommended set.
+            # Install the predefined recommended application set.
             $selected = @($apps | Where-Object { $recommendedAppNames -contains $_.Name })
             if (-not $selected) { Write-Warn '  No recommended apps found in the list.' }
         }
@@ -851,9 +856,9 @@ do {
 # ================================================
 # Download and Installation Loop
 # Iterates over the selected applications, resolves
-# download URLs, detects existing installations,
+# download URLs, checks for existing installations,
 # then downloads and installs each application.
-# Results are collected for the summary report.
+# Results are collected for the final summary report.
 # ================================================
 $results = [System.Collections.Generic.List[PSCustomObject]]::new()
 $totalTimer = [System.Diagnostics.Stopwatch]::StartNew()
@@ -861,24 +866,11 @@ $totalTimer = [System.Diagnostics.Stopwatch]::StartNew()
 foreach ($app in $selected) {
     Write-Host "`n[$($app.Name)]" -ForegroundColor White
 
-    # Resolve the dynamic download URL at runtime when a DynamicUrlScript is defined.
-    if ($app.DynamicUrlScript) {
-        Write-Note "  Resolving latest download URL..."
-        try {
-            $app.Url = & $app.DynamicUrlScript
-            if (-not $app.Url) { throw "Script block returned an empty URL." }
-        }
-        catch {
-            Write-Err "  URL resolve failed: $($_.Exception.Message)"
-            $results.Add([PSCustomObject]@{ App = $app.Name; Status = 'FAILED (URL Resolve)'; Location = '' })
-            continue
-        }
-    }
-
-    # Detect the current installation state — reuse preflight cache when available.
+    # Determine the current installation state, reusing the preflight cache where available.
     $installedInfo = if ($script:_preflightCache.ContainsKey($app.Name)) {
         $script:_preflightCache[$app.Name]
-    } else {
+    }
+    else {
         Get-AppInstalledInfo -App $app -AppsRoot $AppsRoot
     }
 
@@ -895,15 +887,47 @@ foreach ($app in $selected) {
         continue
     }
 
-    # Applications flagged as NoInstDir manage their own installation path.
+    # Resolve the dynamic download URL at runtime when a DynamicUrlScript is defined.
+    if ($app.DynamicUrlScript) {
+        Write-Note "  Resolving latest version..."
+        Start-Spinner -Status "Resolving $($app.Name)"
+        
+        try {
+            $app.Url = & $app.DynamicUrlScript
+            if (-not $app.Url) { throw "Script block returned an empty URL." }
+            Stop-Spinner
+            Write-Ok "  URL resolved successfully."
+        }
+        catch {
+            Stop-Spinner
+            Write-Err "  URL resolve failed: $($_.Exception.Message)"
+            $results.Add([PSCustomObject]@{ App = $app.Name; Status = 'FAILED (URL Resolve)'; Location = '' })
+            continue
+        }
+    }
+
+    if ($installedInfo.Installed) {
+        Write-Ok "  Already installed. Skipping."
+        $loc = if ($installedInfo.AppDir) { $installedInfo.AppDir }
+        elseif ($installedInfo.InstallLocation) { $installedInfo.InstallLocation }
+        elseif ($app.Detect -and $app.Detect.MatchNames) {
+            $reg = Get-InstalledProgramInfo -MatchNames $app.Detect.MatchNames
+            if ($reg) { Get-InstallLocationFromUninstallEntry -RegEntry $reg } else { '' }
+        }
+        else { '' }
+        $results.Add([PSCustomObject]@{ App = $app.Name; Status = 'SKIPPED (Installed)'; Location = $loc })
+        continue
+    }
+
+    # Applications flagged with NoInstDir manage their own installation path internally.
     $appDir = $null
     if ($app.NoInstDir) {
         Write-Note "  Install path: default (custom path not supported)."
     }
     else {
         $appDir = Join-Path $AppsRoot $app.Name
-        # Do not pre-create the target folder for installer-type apps; some installers
-        # ignore the /DIR argument and create their own directory structure.
+        # Do not pre-create the target directory for installer-type applications; some installers
+        # disregard the /DIR argument and create their own directory structure independently.
         if ($app.Type -eq 'zip' -and -not (Test-Path $appDir)) {
             New-Item -ItemType Directory -Path $appDir -Force | Out-Null
         }
@@ -925,8 +949,7 @@ foreach ($app in $selected) {
         switch ($app.Type) {
 
             'installer' {
-                # Substitute the {INSTDIR} placeholder with the resolved target directory.
-                # appDir is $null for NoInstDir applications.
+                # Replace the {INSTDIR} placeholder with the resolved target directory path.
                 $resolvedArgs = if ($app.NoInstDir -or -not $appDir) {
                     $app.SilentArgs
                 }
@@ -936,25 +959,26 @@ foreach ($app in $selected) {
 
                 $procArgs = @{ FilePath = $tmpFile; PassThru = $true; ErrorAction = 'Stop' }
                 if ($resolvedArgs) { $procArgs['ArgumentList'] = $resolvedArgs }
+
+                Write-Note "  Starting silent installation..."
                 $proc = Start-Process @procArgs
 
-                # Drive the animated progress bar while the installer process is running.
-                Start-AnimatedBar -Status "Installing $($app.Name)"
+                # Display a spinner during the installation phase rather than the animated bar.
+                Start-Spinner -Status "Installing $($app.Name)"
+
                 while (-not $proc.HasExited) {
-                    Invoke-AnimationTick
-                    Start-Sleep -Milliseconds 30
+                    Invoke-SpinnerTick
+                    Start-Sleep -Milliseconds 80
                 }
-                Start-Sleep -Seconds 2
-                Stop-AnimatedBar
+
+                Stop-Spinner
 
                 $exitOk = ($proc.ExitCode -eq 0 -or $proc.ExitCode -eq 3010)
                 if ($exitOk) {
                     $status = 'SUCCESS'
                     Write-Ok "  Done."
-
-                    # Verify the target directory was populated by the installer.
-                    # Avoid recording empty or non-existent folders created by installers
-                    # that do not honour the /DIR argument.
+                    
+                    # Resolve and record the installation location after a successful install.
                     $post = Get-AppInstalledInfo -App $app -AppsRoot $AppsRoot
                     if ($appDir -and (Test-DirectoryPopulated -Path $appDir)) {
                         $finalLocation = $appDir
@@ -963,8 +987,6 @@ foreach ($app in $selected) {
                         $finalLocation = $post.InstallLocation
                     }
                     elseif ($app.Detect -and $app.Detect.MatchNames) {
-                        # For NoInstDir apps (e.g. Discord) the installer picks its own path.
-                        # Re-query the registry after install to surface the actual location.
                         $reg = Get-InstalledProgramInfo -MatchNames $app.Detect.MatchNames
                         $finalLocation = if ($reg) { Get-InstallLocationFromUninstallEntry -RegEntry $reg } else { '' }
                     }
@@ -985,8 +1007,8 @@ foreach ($app in $selected) {
 
                 [System.IO.Compression.ZipFile]::ExtractToDirectory($tmpFile, $stagingDir)
 
-                # Flatten a single top-level folder if present (e.g. Telegram Desktop\*),
-                # so the application files reside directly under the target directory.
+                # Flatten a single top-level directory if present (e.g. Telegram Desktop\*),
+                # so application files reside directly under the target directory.
                 $topItems = @(Get-ChildItem -LiteralPath $stagingDir)
                 if ($topItems.Count -eq 1 -and $topItems[0].PSIsContainer) {
                     Get-ChildItem -LiteralPath $topItems[0].FullName |
@@ -1017,7 +1039,8 @@ foreach ($app in $selected) {
         Remove-Item $tmpFile -Force -ErrorAction SilentlyContinue
     }
 
-    # Last-resort location resolution: re-read the registry if still empty after install.
+    # Last-resort location resolution: re-query the registry if the install location
+    # could not be determined during the installation step.
     if (-not $finalLocation) {
         $post = Get-AppInstalledInfo -App $app -AppsRoot $AppsRoot
         $finalLocation = if ($post.AppDir) { $post.AppDir }
@@ -1037,13 +1060,14 @@ $totalTimer.Stop()
 # ================================================
 # Startup Applications — Optional Disable
 # Prompts the user before removing auto-start entries
-# for apps known to register themselves at boot. Covers:
-#   - HKCU Run key (current user auto-start)
-#   - HKLM Run key (all users auto-start)
+# for applications known to register themselves at boot.
+# The following locations are checked:
+#   - HKCU Run key (current-user auto-start)
+#   - HKLM Run key (all-users auto-start)
 #   - Task Manager startup approved list
 #     (HKCU\...\StartupApproved\Run)
-# Apps targeted: Discord, Steam, Free Download Manager.
-# Extend $startupAppPatterns to cover additional apps.
+# Applications targeted: Discord, Steam, Free Download Manager.
+# Extend $startupAppPatterns to include additional applications.
 # ================================================
 Write-Host ''
 $startupChoice = Read-Host '  Disable startup entries for installed apps? (Y/N)'
@@ -1091,8 +1115,8 @@ if ($startupChoice.Trim().ToUpper() -eq 'Y') {
         }
     }
 
-    # Stamp the StartupApproved bytes to the disabled state (03 00 00 00 00 00 00 00 00 00 00 00)
-    # so Task Manager shows the entry as Disabled even if the Run key is re-added by the app.
+    # Write the StartupApproved disabled-state byte sequence (03 00 00 00 00 00 00 00 00 00 00 00)
+    # so that Task Manager shows the entry as Disabled even if the Run key is re-added by the application.
     $disabledBytes = [byte[]](0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00)
 
     foreach ($approvedPath in $approvedPaths) {
@@ -1128,9 +1152,9 @@ else {
 
 # ================================================
 # Installation Summary
-# Displays a formatted table of results grouped by
+# Displays a formatted results table grouped by
 # outcome (SUCCESS / SKIPPED / FAILED), followed by
-# aggregate counts and total elapsed time.
+# aggregate counts and the total elapsed time.
 # ================================================
 $ok = @($results | Where-Object { $_.Status -eq 'SUCCESS' })
 $skipped = @($results | Where-Object { $_.Status -like 'SKIPPED*' })
