@@ -280,8 +280,7 @@ Write-Host ''
 # Each entry is an ordered hashtable describing one
 # application. Required keys: Name, Url (or
 # DynamicUrlScript), FileName, Type, SilentArgs.
-# Optional keys: Detect, LatestVersionScript,
-# NoInstDir, AutoUpdateUrl, SkipUpdateIfInstalled.
+# Optional keys: Detect, NoInstDir, AutoUpdateUrl.
 # ================================================
 $script:UninstallRegPaths = @(
     'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
@@ -394,12 +393,6 @@ function Get-FileVersionSafe {
     catch { return $null }
 }
 
-function ConvertTo-VersionSafe {
-    param([string]$VersionString)
-    if (-not $VersionString) { return $null }
-    $clean = ($VersionString -replace '[^\d\.].*$', '').Trim()
-    try { return [version]$clean } catch { return $null }
-}
 
 function Get-AppInstalledInfo {
     param(
@@ -446,16 +439,10 @@ function Get-AppInstalledInfo {
     return [PSCustomObject]@{ Installed = $false; VersionString = $null; Source = 'registry' }
 }
 
-function Get-LatestVersionForApp {
-    param([Parameter(Mandatory = $true)][hashtable]$App)
-    if (-not $App.LatestVersionScript) { return $null }
-    try { return & $App.LatestVersionScript }
-    catch { return $null }
-}
 
 # In-memory cache for GitHub Releases API responses.
-# Prevents redundant HTTP requests when multiple version
-# scripts query the same repository within one run.
+# Prevents redundant HTTP requests when multiple DynamicUrlScripts
+# query the same repository within one run.
 $script:_ghCache = @{}
 
 function Get-GitHubRelease {
@@ -482,11 +469,6 @@ $apps = @(
         NoInstDir           = $true
         AutoUpdateUrl       = $true
         Detect              = @{ MatchNames = @('Brave') }
-        LatestVersionScript = {
-            $tag = [string](Get-GitHubRelease 'brave/brave-browser').tag_name
-            if ($tag -match '([0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?)') { return $Matches[1] }
-            return $null
-        }
     },
 
     # ---- Development ----
@@ -497,10 +479,6 @@ $apps = @(
         Type                = 'installer'
         SilentArgs          = '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /MERGETASKS=!runcode /DIR="{INSTDIR}"'
         Detect              = @{ MatchNames = @('Microsoft Visual Studio Code', 'Visual Studio Code') }
-        LatestVersionScript = {
-            $j = Invoke-RestMethod -Uri 'https://update.code.visualstudio.com/api/update/win32-x64/stable/latest' -TimeoutSec 6 -ErrorAction Stop
-            return $j.productVersion
-        }
     },
     [ordered]@{
         Name                = 'Git'
@@ -513,11 +491,6 @@ $apps = @(
         Type                = 'installer'
         SilentArgs          = '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /NOCANCEL /SP- /DIR="{INSTDIR}"'
         Detect              = @{ MatchNames = @('Git'); ExeRelativePath = 'bin\git.exe' }
-        LatestVersionScript = {
-            $tag = [string](Get-GitHubRelease 'git-for-windows/git').tag_name
-            if ($tag -match '([0-9]+\.[0-9]+\.[0-9]+)') { return $Matches[1] }
-            return $null
-        }
     },
 
     # ---- Editors & Viewers ----
@@ -532,11 +505,6 @@ $apps = @(
         Type                = 'installer'
         SilentArgs          = '/S /D={INSTDIR}'
         Detect              = @{ MatchNames = @('Notepad++'); ExeRelativePath = 'notepad++.exe' }
-        LatestVersionScript = {
-            $tag = [string](Get-GitHubRelease 'notepad-plus-plus/notepad-plus-plus').tag_name
-            if ($tag -match '([0-9]+\.[0-9]+(\.[0-9]+)?)') { return $Matches[1] }
-            return $null
-        }
     },
     [ordered]@{
         Name                = 'Okular'
@@ -553,16 +521,6 @@ $apps = @(
         SilentArgs          = '/S /D={INSTDIR}'
         NoInstDir           = $false
         Detect              = @{ MatchNames = @('Okular'); ExeRelativePath = 'bin\okular.exe' }
-        LatestVersionScript = {
-            # Parse the version number from the most recent installer filename on the KDE CI server.
-            $baseUrl = 'https://cdn.kde.org/ci-builds/graphics/okular/master/windows/'
-            $r = Invoke-WebRequest -Uri $baseUrl -UseBasicParsing -TimeoutSec 6 -ErrorAction Stop
-            $latest = ($r.Links | Where-Object href -match '\.exe$').href | Sort-Object | Select-Object -Last 1
-            if ($latest -match '([0-9]+\.[0-9]+\.[0-9]+)') { return $Matches[1] }
-            # Fall back to extracting a date-based build stamp when a semver is absent.
-            if ($latest -match '([0-9]{8})') { return $Matches[1] }
-            return $null
-        }
     },
 
     # ---- Media ----
@@ -580,25 +538,6 @@ $apps = @(
         Type                = 'installer'
         SilentArgs          = '/S /D={INSTDIR}'
         Detect              = @{ MatchNames = @('VLC media player', 'VLC'); ExeRelativePath = 'vlc.exe' }
-        LatestVersionScript = {
-            # Query the VLC JSON API for the canonical latest Windows release version.
-            try {
-                $j = Invoke-RestMethod -Uri 'https://get.videolan.org/vlc/last/win64/' -TimeoutSec 6 -ErrorAction Stop
-                # The API response is an HTML directory listing; extract the version from the exe filename.
-                if ($j -match 'vlc-([0-9]+\.[0-9]+\.[0-9]+)-win64\.exe') { return $Matches[1] }
-            }
-            catch { }
-            # Fall back to scraping the main VLC page for the version badge.
-            try {
-                $p = Invoke-WebRequest -Uri 'https://www.videolan.org/vlc/' -UseBasicParsing -TimeoutSec 6 -ErrorAction Stop
-                $m = [regex]::Match($p.Content, '"softwareVersion":\s*"([0-9]+\.[0-9]+\.[0-9]+)"')
-                if ($m.Success) { return $m.Groups[1].Value }
-                $m2 = [regex]::Match($p.Content, 'VLC\s+([0-9]+\.[0-9]+\.[0-9]+)')
-                if ($m2.Success) { return $m2.Groups[1].Value }
-            }
-            catch { }
-            return $null
-        }
     },
 
     # ---- Utilities ----
@@ -613,11 +552,6 @@ $apps = @(
         Type                = 'installer'
         SilentArgs          = '/S /D={INSTDIR}'
         Detect              = @{ MatchNames = @('7-Zip'); ExeRelativePath = '7zFM.exe' }
-        LatestVersionScript = {
-            $tag = [string](Get-GitHubRelease 'ip7z/7zip').tag_name
-            if ($tag -match '([0-9]+\.[0-9]+)') { return $Matches[1] }
-            return $null
-        }
     },
     [ordered]@{
         Name                = 'Bulk Crap Uninstaller'
@@ -630,11 +564,6 @@ $apps = @(
         Type                = 'installer'
         SilentArgs          = '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR="{INSTDIR}"'
         Detect              = @{ MatchNames = @('Bulk Crap Uninstaller', 'BCUninstaller'); ExeRelativePath = 'BCUninstaller.exe' }
-        LatestVersionScript = {
-            $tag = [string](Get-GitHubRelease 'Klocman/Bulk-Crap-Uninstaller').tag_name
-            if ($tag -match '([0-9]+\.[0-9]+(\.[0-9]+)?)') { return $Matches[1] }
-            return $null
-        }
     },
     [ordered]@{
         Name                = 'Free Download Manager'
@@ -643,25 +572,6 @@ $apps = @(
         Type                = 'installer'
         SilentArgs          = '/SP- /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR="{INSTDIR}"'
         Detect              = @{ MatchNames = @('Free Download Manager') }
-        LatestVersionScript = {
-            # Retrieve the latest FDM version from the official changelog/releases feed.
-            try {
-                $j = Invoke-RestMethod -Uri 'https://www.freedownloadmanager.org/api/v1/latest-version.json' -TimeoutSec 6 -ErrorAction Stop
-                if ($j.version -match '([0-9]+\.[0-9]+\.[0-9]+)') { return $Matches[1] }
-            }
-            catch { }
-            # Fall back to scraping the download page for the version badge.
-            try {
-                $p = Invoke-WebRequest -Uri 'https://freedownloadmanager.org/download.htm' -UseBasicParsing -TimeoutSec 6 -ErrorAction Stop
-                $m = [regex]::Match($p.Content, 'FDM\s+([0-9]+\.[0-9]+\.[0-9]+)')
-                if ($m.Success) { return $m.Groups[1].Value }
-                # Try alternate pattern (e.g. "version 6.22.0")
-                $m2 = [regex]::Match($p.Content, '"version"\s*:\s*"([0-9]+\.[0-9]+\.[0-9]+)"')
-                if ($m2.Success) { return $m2.Groups[1].Value }
-            }
-            catch { }
-            return $null
-        }
     },
 
     # ---- Communication ----
@@ -672,14 +582,6 @@ $apps = @(
         Type                  = 'installer'
         SilentArgs            = '/VERYSILENT /NOLAUNCH'
         Detect                = @{ MatchNames = @('Telegram Desktop'); ExeRelativePath = 'Telegram.exe' }
-        SkipUpdateIfInstalled = $true
-        LatestVersionScript   = {
-            $j = Invoke-RestMethod -Uri 'https://api.github.com/repos/telegramdesktop/tdesktop/releases/latest' ` -TimeoutSec 6
-                -Headers @{ 'User-Agent' = 'insta_rig' } -ErrorAction Stop
-            $tag = [string]$j.tag_name
-            if ($tag -match '([0-9]+\.[0-9]+(\.[0-9]+)?)') { return $Matches[1] }
-            return $null
-        }
     },
     [ordered]@{
         Name                  = 'Discord'
@@ -689,16 +591,6 @@ $apps = @(
         SilentArgs            = '-s'
         NoInstDir             = $true
         Detect                = @{ MatchNames = @('Discord') }
-        SkipUpdateIfInstalled = $true
-        LatestVersionScript   = {
-            # Query the Discord stable update API for the current release version.
-            try {
-                $j = Invoke-RestMethod -Uri 'https://discord.com/api/updates/stable?platform=win' -TimeoutSec 6 -ErrorAction Stop
-                if ($j.name -match '([0-9]+\.[0-9]+\.[0-9]+)') { return $Matches[1] }
-            }
-            catch { }
-            return $null
-        }
     },
 
     # ---- Gaming ----
@@ -709,17 +601,6 @@ $apps = @(
         Type                  = 'installer'
         SilentArgs            = '/S /D={INSTDIR}'
         Detect                = @{ MatchNames = @('Steam') }
-        SkipUpdateIfInstalled = $true
-        LatestVersionScript   = {
-            # Steam does not publish a versioned API; extract the build number from the stats page.
-            try {
-                $p = Invoke-WebRequest -Uri 'https://store.steampowered.com/stats/' -UseBasicParsing -TimeoutSec 6 -ErrorAction Stop
-                $m = [regex]::Match($p.Content, 'Steam Client Build:\s*([0-9]+)')
-                if ($m.Success) { return $m.Groups[1].Value }
-            }
-            catch { }
-            return $null
-        }
     }
 )
 
@@ -733,7 +614,8 @@ $recommendedAppNames = @(
     'Free Download Manager',
     'Brave Browser',
     'Git',
-    'VLC Media Player'
+    'VLC Media Player',
+    '7-Zip'
 )
 
 # ================================================
@@ -876,173 +758,17 @@ if (-not (Test-Path $AppsRoot)) { New-Item -ItemType Directory -Path $AppsRoot -
 
 # ================================================
 # Application Selection
-# Pre-fetches installation status and latest available
-# versions before rendering the interactive menu.
-# Version checks are executed in parallel background
-# jobs (PowerShell 5+) to minimise total wait time.
-# A live progress bar is shown during the check phase.
+# Checks installation status for all apps before
+# rendering the interactive menu.
 # ================================================
 
-# Show a spinner while preflight checks are running.
+# Show a spinner while checking installed apps.
 Start-Spinner -Status 'Checking installed apps...'
 
 $script:_preflightCache = @{}
 
-# ------------------------------------------------
-# Preflight strategy:
-#   1. Collect installed state (local registry/disk - fast).
-#   2. Identify which apps need a version check and what kind:
-#        GH  = GitHub Releases API  (batched into ONE job to share TCP connections + cache)
-#        WEB = any other HTTP call  (one job each, run in parallel)
-#   3. Launch all jobs at once, then drain with a single shared 8-second deadline.
-#      A per-app TimeoutSec caps individual stalled requests immediately.
-# ------------------------------------------------
-
-$hasThreadJob = [bool](Get-Command Start-ThreadJob -ErrorAction SilentlyContinue)
-
-# Collect installed state for all apps first (pure local work - no network).
-$installedMap = @{}
 foreach ($app in $apps) {
-    $installedMap[$app.Name] = Get-AppInstalledInfo -App $app -AppsRoot $AppsRoot
-    Invoke-SpinnerTick
-}
-
-# Separate apps into GitHub-backed vs other-web version checks.
-$ghRepos   = [System.Collections.Generic.List[string]]::new()   # unique repos needed
-$ghAppMap  = @{}   # appName -> repo
-$webChecks = [System.Collections.Generic.List[object]]::new()   # { AppName, Script }
-
-foreach ($app in $apps) {
-    if (-not $app.LatestVersionScript) { continue }
-    $src = $app.LatestVersionScript.ToString()
-    # Detect apps whose version script is solely a GitHub call.
-    if ($src -match "Get-GitHubRelease\s+'([^']+)'") {
-        $repo = $Matches[1]
-        $ghAppMap[$app.Name] = $repo
-        if (-not $ghRepos.Contains($repo)) { $ghRepos.Add($repo) }
-    } else {
-        $webChecks.Add([PSCustomObject]@{ AppName = $app.Name; Script = $app.LatestVersionScript })
-    }
-}
-
-$jobList = [System.Collections.Generic.List[object]]::new()
-
-# --- Job 1 (batched): fetch all GitHub repos in a single job so they share one TCP connection
-#     and a single rate-limit slot. Returns a hashtable { repo -> tag_name }.
-if ($ghRepos.Count -gt 0) {
-    $repoList = @($ghRepos)
-    $ghBatchJob = & {
-        $block = {
-            param([string[]]$repos)
-            $ProgressPreference = 'SilentlyContinue'
-            $result = @{}
-            $headers = @{ 'User-Agent' = 'insta_rig' }
-            foreach ($repo in $repos) {
-                try {
-                    $j = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/latest" `
-                        -Headers $headers -TimeoutSec 6 -ErrorAction Stop
-                    $result[$repo] = [string]$j.tag_name
-                } catch {
-                    $result[$repo] = $null
-                }
-            }
-            return $result
-        }
-        if ($hasThreadJob) {
-            Start-ThreadJob -ScriptBlock $block -ArgumentList (,$repoList)
-        } else {
-            Start-Job -ScriptBlock $block -ArgumentList (,$repoList)
-        }
-    }
-    $jobList.Add([PSCustomObject]@{ Kind = 'gh-batch'; Job = $ghBatchJob })
-}
-
-# --- Jobs N+: one per non-GitHub version check, each with an explicit TimeoutSec.
-foreach ($wc in $webChecks) {
-    $scriptText = $wc.Script.ToString()
-    # Inject -TimeoutSec 6 into every Invoke-WebRequest / Invoke-RestMethod that lacks one.
-    $patchedScript = $scriptText `
-        -replace '(Invoke-(?:WebRequest|RestMethod)\b(?:(?!-TimeoutSec)[^\n])*?)(\s+-ErrorAction)', '$1 -TimeoutSec 6$2' `
-        -replace '(Invoke-(?:WebRequest|RestMethod)\b(?:(?!-TimeoutSec)[^\n])*?)$', '$1 -TimeoutSec 6'
-
-    $block = [scriptblock]::Create($patchedScript)
-    $job = if ($hasThreadJob) {
-        Start-ThreadJob -ScriptBlock { param($b) $ProgressPreference='SilentlyContinue'; try { & ([scriptblock]::Create($b)) } catch { $null } } -ArgumentList $scriptText
-    } else {
-        Start-Job       -ScriptBlock { param($b) $ProgressPreference='SilentlyContinue'; try { & ([scriptblock]::Create($b)) } catch { $null } } -ArgumentList $scriptText
-    }
-    $jobList.Add([PSCustomObject]@{ Kind = 'web'; AppName = $wc.AppName; Job = $job })
-}
-
-# --- Drain all jobs with a single 8-second global deadline ---
-$globalDeadline = [System.Diagnostics.Stopwatch]::StartNew()
-$pending = [System.Collections.Generic.List[object]]($jobList)
-$ghTagMap = @{}   # populated once the gh-batch job completes
-
-while ($pending.Count -gt 0 -and $globalDeadline.Elapsed.TotalSeconds -lt 8) {
-    Invoke-SpinnerTick
-    Start-Sleep -Milliseconds 50
-
-    $stillRunning = [System.Collections.Generic.List[object]]::new()
-    foreach ($entry in $pending) {
-        if ($entry.Job.State -eq 'Running') { $stillRunning.Add($entry); continue }
-
-        try   { $result = $entry.Job | Receive-Job }
-        catch { $result = $null }
-        $entry.Job | Remove-Job -Force -ErrorAction SilentlyContinue
-
-        if ($entry.Kind -eq 'gh-batch') {
-            if ($result -is [hashtable]) { $ghTagMap = $result }
-        } else {
-            $script:_preflightCache[$entry.AppName] = [PSCustomObject]@{
-                Installed = $installedMap[$entry.AppName]
-                Latest    = $result
-            }
-        }
-    }
-    $pending = $stillRunning
-}
-
-# Stop any jobs that outlived the deadline, then remove them.
-# Stop-Job signals termination without blocking; we spin while waiting
-# for each to actually exit so the spinner stays alive throughout.
-foreach ($entry in $pending) {
-    $entry.Job | Stop-Job -ErrorAction SilentlyContinue
-}
-foreach ($entry in $pending) {
-    $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    while ($entry.Job.State -eq 'Running' -and $sw.Elapsed.TotalSeconds -lt 2) {
-        Invoke-SpinnerTick
-        Start-Sleep -Milliseconds 30
-    }
-    $entry.Job | Remove-Job -Force -ErrorAction SilentlyContinue
-    Invoke-SpinnerTick
-}
-
-# Resolve GitHub-backed apps from the batch result (tag -> version string).
-foreach ($app in $apps) {
-    if (-not $ghAppMap.ContainsKey($app.Name)) { continue }
-    $repo = $ghAppMap[$app.Name]
-    $tag  = $ghTagMap[$repo]
-    $ver  = $null
-    if ($tag) {
-        if ($tag -match '([0-9]+\.[0-9]+\.[0-9]+(?:\.[0-9]+)?)') { $ver = $Matches[1] }
-        elseif ($tag -match '([0-9]+\.[0-9]+)') { $ver = $Matches[1] }
-    }
-    $script:_preflightCache[$app.Name] = [PSCustomObject]@{
-        Installed = $installedMap[$app.Name]
-        Latest    = $ver
-    }
-    Invoke-SpinnerTick
-}
-
-# Fill in any apps that had no version script (no network call needed).
-foreach ($app in $apps) {
-    if ($script:_preflightCache.ContainsKey($app.Name)) { continue }
-    $script:_preflightCache[$app.Name] = [PSCustomObject]@{
-        Installed = $installedMap[$app.Name]
-        Latest    = $null
-    }
+    $script:_preflightCache[$app.Name] = Get-AppInstalledInfo -App $app -AppsRoot $AppsRoot
     Invoke-SpinnerTick
 }
 
@@ -1061,41 +787,19 @@ Write-Host ('  ' + ('-' * ($winWidth - 6))) -ForegroundColor DarkGray
 
 for ($i = 0; $i -lt $apps.Count; $i++) {
     $app = $apps[$i]
-    $pf = $script:_preflightCache[$app.Name]
-    $inst = $pf.Installed
-    $latest = $pf.Latest
+    $inst = $script:_preflightCache[$app.Name]
 
     $num = "[$($i + 1)]".PadRight(5)
 
-    # Determine the status label and colour based on installation and version state.
     if (-not $inst.Installed) {
         $statusLabel = 'NOT INSTALLED'
         $statusColor = 'DarkGray'
-        $verLabel = if ($latest) { "latest: $latest" } else { '' }
-        $verColor = 'DarkGray'
+        $verLabel    = ''
     }
     else {
-        $instVer = ConvertTo-VersionSafe -VersionString $inst.VersionString
-        $latestVer = ConvertTo-VersionSafe -VersionString $latest
-
-        if ($latestVer -and $instVer -and ($instVer -lt $latestVer)) {
-            $statusLabel = 'UPDATE AVAIL'
-            $statusColor = 'Yellow'
-            $verLabel = "$($inst.VersionString) -> $latest"
-            $verColor = 'Yellow'
-        }
-        elseif ($app.SkipUpdateIfInstalled) {
-            $statusLabel = 'INSTALLED'
-            $statusColor = 'Green'
-            $verLabel = if ($inst.VersionString) { $inst.VersionString } else { '' }
-            $verColor = 'DarkGray'
-        }
-        else {
-            $statusLabel = 'UP TO DATE'
-            $statusColor = 'Green'
-            $verLabel = if ($inst.VersionString) { $inst.VersionString } else { '' }
-            $verColor = 'DarkGray'
-        }
+        $statusLabel = 'INSTALLED'
+        $statusColor = 'Green'
+        $verLabel    = if ($inst.VersionString) { $inst.VersionString } else { '' }
     }
 
     # Mark recommended apps with a star indicator.
@@ -1106,12 +810,12 @@ for ($i = 0; $i -lt $apps.Count; $i++) {
     Write-Host "  $num" -NoNewline -ForegroundColor DarkGray
     Write-Host $statusCol -NoNewline -ForegroundColor $statusColor
     Write-Host $nameCol   -NoNewline -ForegroundColor White
-    Write-Host $verLabel             -ForegroundColor $verColor
+    Write-Host $verLabel             -ForegroundColor DarkGray
 }
 
 Write-Host ('  ' + ('-' * ($winWidth - 6))) -ForegroundColor DarkGray
 Write-Host '  * = included in Recommended set' -ForegroundColor DarkGray
-Write-Info '  A = all   R = recommended   U = updates only   1,3,5 = pick by number'
+Write-Info '  A = all   R = recommended   1,3,5 = pick by number'
 Write-Host ''
 
 $selected = $null
@@ -1126,15 +830,6 @@ do {
             # Install the predefined recommended set.
             $selected = @($apps | Where-Object { $recommendedAppNames -contains $_.Name })
             if (-not $selected) { Write-Warn '  No recommended apps found in the list.' }
-        }
-        'U' {
-            $selected = @($apps | Where-Object {
-                    $pf = $script:_preflightCache[$_.Name]
-                    $iv = ConvertTo-VersionSafe -VersionString $pf.Installed.VersionString
-                    $lv = ConvertTo-VersionSafe -VersionString $pf.Latest
-                    (-not $pf.Installed.Installed) -or ($iv -and $lv -and $iv -lt $lv)
-                })
-            if (-not $selected) { Write-Warn '  No updates or new installs found.' }
         }
         default {
             $indices = $choice -split ',' |
@@ -1157,9 +852,8 @@ do {
 # Download and Installation Loop
 # Iterates over the selected applications, resolves
 # download URLs, detects existing installations,
-# compares versions, then downloads and installs
-# each application. Results are collected for the
-# summary report.
+# then downloads and installs each application.
+# Results are collected for the summary report.
 # ================================================
 $results = [System.Collections.Generic.List[PSCustomObject]]::new()
 $totalTimer = [System.Diagnostics.Stopwatch]::StartNew()
@@ -1182,60 +876,23 @@ foreach ($app in $selected) {
     }
 
     # Detect the current installation state — reuse preflight cache when available.
-    $pfCached = $script:_preflightCache[$app.Name]
-    $installedInfo = if ($pfCached) { $pfCached.Installed } else { Get-AppInstalledInfo -App $app -AppsRoot $AppsRoot }
-    $installedVersion = ConvertTo-VersionSafe -VersionString $installedInfo.VersionString
-
-    $latestVersionString = if ($pfCached) { $pfCached.Latest } else { Get-LatestVersionForApp -App $app }
-    $latestVersion = ConvertTo-VersionSafe -VersionString $latestVersionString
+    $installedInfo = if ($script:_preflightCache.ContainsKey($app.Name)) {
+        $script:_preflightCache[$app.Name]
+    } else {
+        Get-AppInstalledInfo -App $app -AppsRoot $AppsRoot
+    }
 
     if ($installedInfo.Installed) {
-        if ($app.SkipUpdateIfInstalled) {
-            Write-Ok "  Installed. Skipping."
-            $loc = if ($installedInfo.AppDir) { $installedInfo.AppDir }
-            elseif ($installedInfo.InstallLocation) { $installedInfo.InstallLocation }
-            elseif ($app.Detect -and $app.Detect.MatchNames) {
-                # Re-query the registry to derive the install path for NoInstDir apps (e.g. Discord).
-                $reg = Get-InstalledProgramInfo -MatchNames $app.Detect.MatchNames
-                if ($reg) { Get-InstallLocationFromUninstallEntry -RegEntry $reg } else { '' }
-            }
-            else { '' }
-            $results.Add([PSCustomObject]@{ App = $app.Name; Status = 'SKIPPED (Installed)'; Location = $loc })
-            continue
+        Write-Ok "  Already installed. Skipping."
+        $loc = if ($installedInfo.AppDir) { $installedInfo.AppDir }
+        elseif ($installedInfo.InstallLocation) { $installedInfo.InstallLocation }
+        elseif ($app.Detect -and $app.Detect.MatchNames) {
+            $reg = Get-InstalledProgramInfo -MatchNames $app.Detect.MatchNames
+            if ($reg) { Get-InstallLocationFromUninstallEntry -RegEntry $reg } else { '' }
         }
-
-        $verLabel = if ($installedInfo.VersionString) { $installedInfo.VersionString } else { 'unknown version' }
-        Write-Ok "  Installed: $verLabel"
-
-        if ($latestVersion -and $installedVersion) {
-            if ($installedVersion -ge $latestVersion) {
-                Write-Ok "  Up to date. Skipping. (latest: $latestVersionString)"
-                $loc = if ($installedInfo.AppDir) { $installedInfo.AppDir }
-                elseif ($installedInfo.InstallLocation) { $installedInfo.InstallLocation }
-                else { '' }
-                $results.Add([PSCustomObject]@{ App = $app.Name; Status = 'SKIPPED (Up-to-date)'; Location = $loc })
-                continue
-            }
-            else {
-                Write-Warn "  Outdated. Updating... (latest: $latestVersionString)"
-            }
-        }
-        elseif ($latestVersionString) {
-            Write-Warn "  Updating... (latest: $latestVersionString; local version unknown)"
-        }
-        else {
-            if ($app.AutoUpdateUrl -or $app.DynamicUrlScript) {
-                Write-Warn "  Unable to compare version. Updating..."
-            }
-            else {
-                Write-Warn "  Skipping (installed; latest version unknown)."
-                $loc = if ($installedInfo.AppDir) { $installedInfo.AppDir }
-                elseif ($installedInfo.InstallLocation) { $installedInfo.InstallLocation }
-                else { '' }
-                $results.Add([PSCustomObject]@{ App = $app.Name; Status = 'SKIPPED (Already installed)'; Location = $loc })
-                continue
-            }
-        }
+        else { '' }
+        $results.Add([PSCustomObject]@{ App = $app.Name; Status = 'SKIPPED (Installed)'; Location = $loc })
+        continue
     }
 
     # Applications flagged as NoInstDir manage their own installation path.
@@ -1505,7 +1162,7 @@ foreach ($r in $results) {
 Write-Host ("  " + ('-' * 58)) -ForegroundColor DarkGray
 
 $parts = @()
-if ($ok.Count) { $parts += "$($ok.Count) installed/updated" }
+if ($ok.Count) { $parts += "$($ok.Count) installed" }
 if ($skipped.Count) { $parts += "$($skipped.Count) skipped" }
 if ($failed.Count) { $parts += "$($failed.Count) failed" }
 Write-Host ("  " + ($parts -join '   .   ')) -ForegroundColor DarkGray
